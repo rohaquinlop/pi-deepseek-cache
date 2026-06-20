@@ -7,7 +7,7 @@
   "author": "rhafid",
   "repository": {
     "type": "git",
-    "url": "https://github.com/rhafid/pi-deepseek-cache"
+    "url": "https://github.com/rohaquinlop/pi-deepseek-cache"
   },
   "pi": {
     "extensions": ["./extensions/index.ts"]

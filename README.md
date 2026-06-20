@@ -31,7 +31,7 @@ A 150M token coding session with deepseek-v4-pro at xhigh thinking costs **~$170
 ## Installation
 
 ```bash
-pi install git:github.com/rhafid/pi-deepseek-cache
+pi install git:github.com/rohaquinlop/pi-deepseek-cache
 ```
 
 Or via npm:
