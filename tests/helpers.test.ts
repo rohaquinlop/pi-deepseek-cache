@@ -17,13 +17,18 @@ describe("isDeepSeekModel", () => {
     expect(isDeepSeekModel(undefined)).toBe(false);
   });
 
-  it("matches 'nan' provider only for deepseek-* models", () => {
-    // NaN Builders serves both DeepSeek and non-DeepSeek models
+  it("matches deepseek-* models on any provider", () => {
+    // Works regardless of provider name — NaN Builders, OpenRouter, custom
     expect(isDeepSeekModel({ id: "deepseek-v4-pro", provider: "nan" })).toBe(true);
-    expect(isDeepSeekModel({ id: "deepseek-v4-flash", provider: "nan" })).toBe(true);
-    // Non-DeepSeek models on NaN Builders should NOT match
+    expect(isDeepSeekModel({ id: "deepseek-v4-flash", provider: "openrouter" })).toBe(true);
+    expect(isDeepSeekModel({ id: "deepseek-v4-pro", provider: "custom-proxy" })).toBe(true);
+  });
+
+  it("does not match non-deepseek models on any provider", () => {
+    // Provider name alone is never sufficient — must match model ID or provider "deepseek"
     expect(isDeepSeekModel({ id: "mimo-v2.5", provider: "nan" })).toBe(false);
     expect(isDeepSeekModel({ id: "qwen3.6", provider: "nan" })).toBe(false);
+    expect(isDeepSeekModel({ id: "claude-sonnet-4-5", provider: "anthropic" })).toBe(false);
   });
 
   it("matches 'deepseek' provider", () => {
@@ -41,7 +46,7 @@ describe("isDeepSeekModel", () => {
     expect(isDeepSeekModel({ id: "claude-sonnet-4-5", provider: "anthropic" })).toBe(false);
     expect(isDeepSeekModel({ id: "gpt-4o", provider: "openai" })).toBe(false);
     expect(isDeepSeekModel({ id: "mimo-v2.5", provider: "xiaomi" })).toBe(false);
-    expect(isDeepSeekModel({ id: "qwen3.6", provider: "nan" })).toBe(false);
+    expect(isDeepSeekModel({ id: "mimo-v2.5", provider: "nan" })).toBe(false);
   });
 });
 

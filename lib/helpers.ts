@@ -8,14 +8,12 @@
  */
 export function isDeepSeekModel(model: { id: string; provider: string } | undefined): boolean {
   if (!model) return false;
-  // Match by model ID — the most reliable signal. Works regardless of provider.
+  // Match by model ID prefix — the most reliable, provider-agnostic signal.
+  // Works for NaN Builders, OpenRouter, direct DeepSeek API, and custom providers.
   if (model.id.toLowerCase().startsWith("deepseek-")) return true;
-  // Match by provider — direct DeepSeek API (handles non-prefixed model IDs too).
-  // NaN Builders is NOT matched here because it also serves non-DeepSeek models
-  // (mimo-v2.5, qwen3.6) where cache optimizations don't apply.
+  // Match by provider name — direct DeepSeek API, covers edge cases where
+  // model IDs don't use the deepseek- prefix.
   if (model.provider === "deepseek") return true;
-  // NaN Builders: only match when the model is actually a DeepSeek variant.
-  if (model.provider === "nan" && model.id.toLowerCase().startsWith("deepseek-")) return true;
   return false;
 }
 

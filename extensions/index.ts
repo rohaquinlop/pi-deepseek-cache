@@ -21,9 +21,9 @@
  *   P4 — TUI overlays: /cache-stats and /cache-graph display live hit-rate
  *        data and ASCII trend charts as overlay popups.
  *
- * Works with any provider serving DeepSeek models (nan, deepseek, or any
- * provider with a deepseek-* model id). Non-DeepSeek models pass through
- * unchanged.
+ * Works with any provider serving DeepSeek models — detected by model ID
+ * prefix (deepseek-*) or provider name (deepseek). No provider names are
+ * hardcoded. Non-DeepSeek models pass through unchanged.
  *
  * Install: pi install npm:@rohaquinlop/pi-deepseek-cache
  */
@@ -622,9 +622,13 @@ async function summarizeWithFlash(
   ctx: ExtensionContext,
   signal: AbortSignal,
 ): Promise<string | undefined> {
-  // Try the current model's provider first, then fall back to known providers
-  let model = ctx.modelRegistry.find("nan", "deepseek-v4-flash")
-    ?? ctx.modelRegistry.find("deepseek", "deepseek-v4-flash");
+  // Use the active model's provider — it already serves DeepSeek models.
+  // No hardcoded provider names. Works for NaN Builders, OpenRouter,
+  // direct DeepSeek API, and custom providers.
+  const currentProvider = ctx.model?.provider;
+  let model = currentProvider
+    ? ctx.modelRegistry.find(currentProvider, "deepseek-v4-flash")
+    : undefined;
 
   // Last resort: search any provider
   if (!model) {

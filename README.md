@@ -42,9 +42,8 @@ The extension activates automatically. No configuration needed.
 ## Provider Support
 
 Works with any provider serving DeepSeek models:
-- **NaN Builders** (`nan` provider)
-- **DeepSeek API** (`deepseek` provider)
-- Any provider with `deepseek-*` model IDs
+- **Any provider** with `deepseek-*` model IDs (NaN Builders, OpenRouter, custom proxies, etc.)
+- **DeepSeek API** (`deepseek` provider) — direct API users
 
 Non-DeepSeek models pass through unchanged.
 
