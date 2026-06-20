@@ -1,23 +1,22 @@
 # pi-deepseek-cache
 
-**Reduce DeepSeek API costs by 95%+** through prefix cache optimization. Zero configuration required — auto-detects DeepSeek models and applies best practices transparently.
+**Reduce DeepSeek API costs by 95%+** through multi-layered prefix cache optimization. Zero configuration — auto-detects DeepSeek models and applies best practices transparently.
 
 ## The Problem
 
 DeepSeek's API uses [prefix caching](https://api-docs.deepseek.com/guides/kv_cache/) — identical prompt prefixes served from disk cache at **50–120× lower cost** than fresh computation. But the cache only works when every byte from position 0 is identical across requests.
 
-Pi's default system prompt embeds `Current date: YYYY-MM-DD` and `Current working directory: <cwd>` — dynamic values that change daily and per session, silently busting the entire prefix cache. The result: every turn recomputes the full prompt from scratch, costing 50–120× more than necessary.
+Pi's default system prompt embeds `Current date: YYYY-MM-DD` and `Current working directory: <cwd>` — dynamic values that change daily and per session, silently busting the entire prefix cache.
 
 ## What This Extension Does
 
-| Feature | Impact |
-|---------|--------|
-| **Freezes system prompt date** | Prevents daily cache busting — date locked at session start |
-| **Freezes working directory** | Prevents cache busting when navigating directories |
-| **Real-time cache hit rate** | Shows hit percentage in TUI status bar: `Cache: 87% hit · 5 turns` |
-| **Cache shape diagnostics** | Warns when the system prompt changes between turns |
-| **Hit rate alerts** | Notifies when hit rate drops below 50% after 3+ turns |
-| **`/cache-stats` command** | Detailed token breakdown, hit rate, prompt hash |
+| Layer | Feature | Impact |
+|-------|---------|--------|
+| **P0** | Date & CWD freeze | Root-cause fix — locks session date and directory, preventing daily/per-session cache bust |
+| **P1** | Hit-rate telemetry | Persistent stats with real-time status bar: `Cache: 93.5% · 12t · 45KR` |
+| **P2** | Prefix guard | SHA-256 hash diagnostics — warns when prompt prefix changes between turns |
+| **P3** | Cache-friendly compaction | Deterministic summarization via deepseek-v4-flash at temperature 0, SHA-256 cached for stable replays |
+| **P4** | TUI overlays | `/cache-stats` popup with hit rate, tokens, cost savings. `/cache-graph` ASCII trend chart |
 
 ## Cost Impact
 
@@ -25,8 +24,6 @@ Pi's default system prompt embeds `Current date: YYYY-MM-DD` and `Current workin
 |---|---|---|
 | **deepseek-v4-flash** input | $0.14/M tokens | $0.003/M tokens (98% less) |
 | **deepseek-v4-pro** input | $3.00/M tokens | $0.025/M tokens (99% less) |
-
-A 150M token coding session with deepseek-v4-pro at xhigh thinking costs **~$170 without cache** vs **~$1.43 with optimized cache**.
 
 ## Installation
 
@@ -40,7 +37,7 @@ Or via git:
 pi install git:github.com/rohaquinlop/pi-deepseek-cache
 ```
 
-The extension activates automatically on next pi restart or `/reload`. No additional configuration needed.
+The extension activates automatically. No configuration needed.
 
 ## Provider Support
 
@@ -49,50 +46,30 @@ Works with any provider serving DeepSeek models:
 - **DeepSeek API** (`deepseek` provider)
 - Any provider with `deepseek-*` model IDs
 
-Non-DeepSeek models pass through completely unchanged — zero overhead.
+Non-DeepSeek models pass through unchanged.
 
 ## Commands
 
 ### `/cache-stats`
+Overlay popup showing cumulative session stats: hit rate, cache read/write/input tokens, turns, and estimated cost savings.
 
-Shows detailed cache statistics for the current session:
+### `/cache-graph`
+ASCII trend chart of hit rate over turns — helps spot regressions.
 
-```
-── DeepSeek Cache Stats ──
-  Turns:           12
-  Assistant msgs:  15
-
-  Cache read:      45.2K tokens
-  Cache write:     3.1K tokens
-  Input (non-ctx): 8.4K tokens
-  Output:          22.1K tokens
-
-  Hit rate:        93.5% (45200/48300)
-
-  Session date:    2026-06-20 (frozen)
-  Session CWD:     /Users/rhafid/project
-  Prompt hash:     0x8f3a12b9
-```
+### `/cache-reset`
+Clears all cached statistics, history, and summary cache. Useful after major prompt changes.
 
 ## How It Works
 
-1. **Session start**: Captures the current date and working directory
-2. **Before each prompt**: Replaces the dynamic `Current date` and `Current working directory` lines in the system prompt with frozen values from session start
-3. **Each turn**: Accumulates cache read/write tokens from the API response, calculates hit rate, and updates the TUI status bar
-4. **Shape monitoring**: Hashes the system prompt each turn — if it changes (e.g., skills loaded, tools toggled), warns about potential cache degradation
+**P0 (Date/CWD freeze):** On `before_agent_start`, replaces the dynamic `Current date` and `Current working directory` lines with values frozen at session start. The system prompt prefix stays byte-identical across the entire session.
 
-The extension only modifies two lines at the very end of the system prompt. All other content (project context, guidelines, tool definitions, skills) passes through unchanged.
+**P1 (Telemetry):** Accumulates `cacheRead`, `input`, `cacheWrite`, and `turns` from every assistant message's usage data. Persists to `~/.pi/agent/extensions/deepseek-cache/stats.json` so stats survive `/reload` and restart.
 
-## Why This Matters for DeepSeek Specifically
+**P2 (Prefix guard):** On `before_provider_request`, SHA-256 hashes all messages except the last to fingerprint the prefix. Warns when the hash changes — diagnosing what busted the cache.
 
-DeepSeek's caching is **automatic and transparent** — there are no API flags to toggle. Cache optimization is entirely about prompt engineering:
+**P3 (Compaction):** On `session_before_compact`, summarizes conversation history with deepseek-v4-flash at temperature 0. Summaries are SHA-256 hashed and cached — identical histories produce byte-identical summaries, keeping compaction cache-stable.
 
-1. **Static system prompt** — no timestamps, dates, user IDs, session IDs
-2. **Message ordering** — most stable content at position 0
-3. **Stable tool serialization** — sorted keys, raw strings
-4. **Trim history from tail** — never remove from middle/head
-
-This extension automates principles 1 and 2 for every pi session.
+**P4 (Overlays):** `/cache-stats` and `/cache-graph` render as TUI overlay popups (Esc to dismiss) with formatted hit-rate data and ASCII trend charts.
 
 ## License
 
