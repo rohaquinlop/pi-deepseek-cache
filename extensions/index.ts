@@ -219,33 +219,45 @@ class CacheStatsOverlay implements Focusable {
 
   render(_width: number): string[] {
     const { cacheRead, input, cacheWrite, turns } = this.stats;
-    const denom = cacheRead + input;
-    const hitRate = denom ? ((cacheRead / denom) * 100).toFixed(1) : "0.0";
+    const totalPrompt = cacheRead + input + cacheWrite;
+    const hitRate = totalPrompt ? ((cacheRead / totalPrompt) * 100).toFixed(1) : "0.0";
     const saved = (cacheRead / 1_000_000) * (COST_PER_M_INPUT - COST_PER_M_CACHE_READ);
     const savedStr = saved >= 0.01 ? `$${saved.toFixed(2)}` : "< $0.01";
     const th = this.theme;
     const w = this.width;
     const inner = w - 2;
 
+    // For DeepSeek: input = prompt_cache_miss_tokens, cacheWrite is always 0.
+    // For Anthropic/OpenRouter: cacheWrite holds actual cache write tokens.
+    const showCacheWrite = cacheWrite > 0;
+
     const pad = (s: string) => s + " ".repeat(Math.max(0, inner - visibleWidth(s)));
     const row = (s: string) => th.fg("border", "│") + pad(s) + th.fg("border", "│");
     const label = (k: string, v: string) =>
       `  ${th.fg("dim", k.padEnd(18))}${th.fg("accent", v)}`;
 
-    return [
+    const rows: string[] = [
       th.fg("border", `╭${"─".repeat(inner)}╮`),
       row(` ${th.fg("accent", "⚡ DeepSeek Cache Stats")}`),
       row(""),
       row(label("Hit rate", `${hitRate}%`)),
-      row(label("Cache read (hit)", `${cacheRead.toLocaleString()} tokens`)),
-      row(label("Cache write (miss)", `${cacheWrite.toLocaleString()} tokens`)),
-      row(label("Input (non-cache)", `${input.toLocaleString()} tokens`)),
+      row(label("Cache hits", `${cacheRead.toLocaleString()} tokens`)),
+    ];
+
+    if (showCacheWrite) {
+      rows.push(row(label("Cache writes", `${cacheWrite.toLocaleString()} tokens`)));
+    }
+
+    rows.push(
+      row(label("Cache misses", `${input.toLocaleString()} tokens`)),
       row(label("Turns", `${turns}`)),
       row(label("Est. savings", `${th.fg("accent", savedStr)}`)),
       row(""),
       row(` ${th.fg("dim", "Esc / Enter to close")}`),
       th.fg("border", `╰${"─".repeat(inner)}╯`),
-    ];
+    );
+
+    return rows;
   }
 
   invalidate(): void {}
@@ -456,8 +468,11 @@ export default function (pi: ExtensionAPI) {
     const stats: PersistedStats = { cacheRead, input, cacheWrite, turns };
     scheduleSaveStats(stats);
 
-    const denom = cacheRead + input;
-    const rate = denom ? (cacheRead / denom) * 100 : 0;
+    // Use total prompt tokens as denominator for accurate hit rate.
+    // For DeepSeek: cacheWrite=0, input=miss_tokens → total=prompt_tokens.
+    // For Anthropic: cacheWrite holds actual writes, included in total.
+    const totalPrompt = cacheRead + input + cacheWrite;
+    const rate = totalPrompt > 0 ? (cacheRead / totalPrompt) * 100 : 0;
 
     if (ctx.hasUI) {
       ctx.ui.setStatus("cache", `Cache: ${rate.toFixed(1)}% · ${turns}t · ${formatTokens(cacheRead)}R`);

@@ -115,30 +115,49 @@ describe("todayISO", () => {
 describe("calcHitRate", () => {
   it("returns 0 when no tokens", () => {
     expect(calcHitRate(0, 0)).toBe(0);
+    expect(calcHitRate(0, 0, 0)).toBe(0);
   });
 
   it("returns 100 when all cache reads", () => {
-    expect(calcHitRate(1000, 0)).toBe(100);
+    expect(calcHitRate(1000, 0, 0)).toBe(100);
   });
 
   it("returns 0 when all input (no cache reads)", () => {
-    expect(calcHitRate(0, 1000)).toBe(0);
+    expect(calcHitRate(0, 1000, 0)).toBe(0);
   });
 
-  it("calculates mixed scenarios", () => {
+  it("calculates mixed scenarios (no cacheWrite)", () => {
     expect(calcHitRate(500, 500)).toBe(50);
     expect(calcHitRate(750, 250)).toBe(75);
     expect(calcHitRate(900, 100)).toBe(90);
+  });
+
+  it("includes cacheWrite in denominator", () => {
+    // 700 cache hits, 200 misses, 100 writes = 1000 total
+    // Hit rate = 700 / 1000 = 70%
+    expect(calcHitRate(700, 200, 100)).toBe(70);
+  });
+
+  it("equivalently: cacheRead + input + cacheWrite = promptTokens", () => {
+    // Verifies that including cacheWrite gives the same result as
+    // cacheRead / promptTokens
+    expect(calcHitRate(7000, 3000, 0)).toBe(70);    // DeepSeek: write=0
+    expect(calcHitRate(7000, 2000, 1000)).toBe(70); // Anthropic: write>0
   });
 
   it("handles large numbers", () => {
     expect(calcHitRate(1_000_000, 50_000)).toBeCloseTo(95.24, 1);
   });
 
-  it("handles cache reads > input gracefully", () => {
-    // This can happen when a provider reports cache_read > prompt_tokens
-    // (e.g. some OpenRouter responses). Should not break.
-    expect(calcHitRate(2000, 1000)).toBeGreaterThan(50);
+  it("cacheWrite defaults to 0 when omitted", () => {
+    // Backward compat: 2-arg call still works
+    expect(calcHitRate(500, 500)).toBe(50);
+  });
+
+  it("handles edge cases gracefully", () => {
+    expect(calcHitRate(2000, 1000, 0)).toBeGreaterThan(50);
+    expect(calcHitRate(0, 0, 0)).toBe(0);
+    expect(calcHitRate(100, 0, 0)).toBe(100);
   });
 });
 

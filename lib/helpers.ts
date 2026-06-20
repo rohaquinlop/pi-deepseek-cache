@@ -36,10 +36,15 @@ export function todayISO(): string {
 }
 
 /**
- * Calculate cache hit rate as a percentage string.
+ * Calculate cache hit rate as a percentage.
+ * Uses (cacheRead + input + cacheWrite) as the denominator, which equals
+ * promptTokens total. This is correct for all providers.
+ *
+ * For DeepSeek: cacheWrite is always 0, input = prompt_cache_miss_tokens.
+ * For Anthropic: cacheWrite holds the cache write tokens count.
  */
-export function calcHitRate(cacheRead: number, input: number): number {
-  const denom = cacheRead + input;
+export function calcHitRate(cacheRead: number, input: number, cacheWrite: number = 0): number {
+  const denom = cacheRead + input + cacheWrite;
   return denom > 0 ? (cacheRead / denom) * 100 : 0;
 }
 
