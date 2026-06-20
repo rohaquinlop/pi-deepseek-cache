@@ -1,5 +1,5 @@
 {
-  "name": "pi-deepseek-cache",
+  "name": "@rohaquinlop/pi-deepseek-cache",
   "version": "1.0.0",
   "description": "Optimize DeepSeek prefix cache hit rates — reduce API input costs by 95%+ in multi-turn coding sessions",
   "keywords": ["pi-package"],

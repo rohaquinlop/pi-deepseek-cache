@@ -14,7 +14,7 @@
  * The extension is idempotent — it only modifies the system prompt for
  * DeepSeek-proximate models; other providers pass through unchanged.
  *
- * Install: pi install git:github.com/rhafid/pi-deepseek-cache
+ * Install: pi install npm:@rohaquinlop/pi-deepseek-cache
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
