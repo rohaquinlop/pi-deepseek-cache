@@ -8,8 +8,11 @@
  *        that prevents daily and per-directory cache busting.
  *
  *   P1 — Hit-rate telemetry: accumulates cacheRead/input/cacheWrite/turns
- *        from every assistant message. Persists to disk so stats survive
- *        /reload and restart.
+ *        from every assistant message. Per-session stats are stored in
+ *        stats-{sessionId}.json / history-{sessionId}.json files so concurrent
+ *        pi sessions never race on the same file. The status line shows THIS
+ *        session's hit rate only. /cache-stats shows both this session and
+ *        an aggregate across all sessions.
  *
  *   P2 — Cache shape guard: SHA-256 hashes the prompt prefix each turn and
  *        warns when it changes — diagnosing what busted the cache.
@@ -18,8 +21,8 @@
  *        summarizes with deepseek-v4-flash at temperature 0, and caches
  *        summaries by SHA-256 hash for deterministic, cache-stable replays.
  *
- *   P4 — TUI overlays: /cache-stats and /cache-graph display live hit-rate
- *        data and ASCII trend charts as overlay popups.
+ *   P4 — TUI overlays: /cache-stats and /cache-graph display hit-rate
+ *        data, cost estimates, and ASCII trend charts as overlay popups.
  *
  * Works with any provider serving DeepSeek models — detected by model ID
  * prefix (deepseek-*) or provider name (deepseek). No provider names are
@@ -33,16 +36,19 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
 import { matchesKey, visibleWidth, type Focusable } from "@earendil-works/pi-tui";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   isDeepSeekModel,
-  formatTokens,
   todayISO,
-  DATE_LINE_RE,
-  CWD_LINE_RE,
+  calcHitRate,
+  estimateSavings,
+  isDateFrozen,
+  isCwdFrozen,
+  applyDateFreeze,
+  applyCwdFreeze,
 } from "../lib/helpers.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -50,17 +56,14 @@ import {
 // ═══════════════════════════════════════════════════════════════════════════
 
 const STATS_DIR = join(homedir(), ".pi", "agent", "extensions", "deepseek-cache");
-const STATS_FILE = join(STATS_DIR, "stats.json");
-const HISTORY_FILE = join(STATS_DIR, "history.json");
 const SUMMARY_CACHE_FILE = join(STATS_DIR, "summary-cache.json");
 
 const SUMMARY_MAX_TOKENS = 8192;
 const MAX_HISTORY_POINTS = 100;
 const WRITE_DEBOUNCE_MS = 1000;
+const MAX_SESSION_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
-// DeepSeek pricing per million tokens (USD)
-const COST_PER_M_CACHE_READ = 0.027;
-const COST_PER_M_INPUT = 0.27;
+
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Types
@@ -86,7 +89,7 @@ interface CachedMessage {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Persistence (P1)
+// Persistence (P1) — per-session files
 // ═══════════════════════════════════════════════════════════════════════════
 
 let extensionCtx: ExtensionContext | undefined;
@@ -95,24 +98,12 @@ let statsTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingHistory: HistoryPoint[] | null = null;
 let historyTimer: ReturnType<typeof setTimeout> | null = null;
 
-function loadStats(): PersistedStats {
-  try {
-    if (existsSync(STATS_FILE)) return JSON.parse(readFileSync(STATS_FILE, "utf-8"));
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    extensionCtx?.ui.notify(`[deepseek-cache] stats load failed (${msg}), reset`, "warning");
-  }
-  return { cacheRead: 0, input: 0, cacheWrite: 0, turns: 0 };
+function statsPath(sessionId: string): string {
+  return join(STATS_DIR, `stats-${sessionId}.json`);
 }
 
-function loadHistory(): HistoryPoint[] {
-  try {
-    if (existsSync(HISTORY_FILE)) return JSON.parse(readFileSync(HISTORY_FILE, "utf-8"));
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    extensionCtx?.ui.notify(`[deepseek-cache] history load failed (${msg}), reset`, "warning");
-  }
-  return [];
+function historyPath(sessionId: string): string {
+  return join(STATS_DIR, `history-${sessionId}.json`);
 }
 
 function loadSummaryCache(): Map<string, string> {
@@ -126,46 +117,6 @@ function loadSummaryCache(): Map<string, string> {
   return new Map();
 }
 
-function scheduleSaveStats(s: PersistedStats) {
-  pendingStats = s;
-  if (statsTimer) return;
-  statsTimer = setTimeout(() => {
-    statsTimer = null;
-    const data = pendingStats;
-    pendingStats = null;
-    if (!data) return;
-    (async () => {
-      try {
-        if (!existsSync(STATS_DIR)) mkdirSync(STATS_DIR, { recursive: true });
-        await writeFile(STATS_FILE, JSON.stringify(data, null, 2));
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        extensionCtx?.ui.notify(`[deepseek-cache] stats save failed: ${msg}`, "error");
-      }
-    })();
-  }, WRITE_DEBOUNCE_MS);
-}
-
-function scheduleSaveHistory(h: HistoryPoint[]) {
-  pendingHistory = h;
-  if (historyTimer) return;
-  historyTimer = setTimeout(() => {
-    historyTimer = null;
-    const data = pendingHistory;
-    pendingHistory = null;
-    if (!data) return;
-    (async () => {
-      try {
-        if (!existsSync(STATS_DIR)) mkdirSync(STATS_DIR, { recursive: true });
-        await writeFile(HISTORY_FILE, JSON.stringify(data.slice(-MAX_HISTORY_POINTS), null, 2));
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        extensionCtx?.ui.notify(`[deepseek-cache] history save failed: ${msg}`, "error");
-      }
-    })();
-  }, WRITE_DEBOUNCE_MS);
-}
-
 function saveSummaryCacheSync(cache: Map<string, string>) {
   try {
     if (!existsSync(STATS_DIR)) mkdirSync(STATS_DIR, { recursive: true });
@@ -177,20 +128,119 @@ function saveSummaryCacheSync(cache: Map<string, string>) {
   }
 }
 
-function flushPendingWrites() {
+/**
+ * Delete stats-*.json and history-*.json files older than 30 days.
+ */
+function cleanupOldSessions() {
+  try {
+    if (!existsSync(STATS_DIR)) return;
+    const cutoff = Date.now() - MAX_SESSION_AGE_MS;
+    const files = readdirSync(STATS_DIR);
+    for (const file of files) {
+      if ((file.startsWith("stats-") && file.endsWith(".json")) ||
+          (file.startsWith("history-") && file.endsWith(".json"))) {
+        try {
+          const filePath = join(STATS_DIR, file);
+          const st = statSync(filePath);
+          if (st.mtimeMs < cutoff) {
+            unlinkSync(filePath);
+          }
+        } catch {
+          // best-effort per file
+        }
+      }
+    }
+  } catch {
+    // best-effort
+  }
+}
+
+/**
+ * Read all stats-*.json files in STATS_DIR and return summed PersistedStats
+ * plus the count of sessions.
+ */
+function aggregateAllSessions(): PersistedStats & { sessionCount: number } {
+  const agg: PersistedStats = { cacheRead: 0, input: 0, cacheWrite: 0, turns: 0 };
+  let sessionCount = 0;
+  try {
+    if (!existsSync(STATS_DIR)) return { ...agg, sessionCount: 0 };
+    const files = readdirSync(STATS_DIR);
+    for (const file of files) {
+      if (file.startsWith("stats-") && file.endsWith(".json")) {
+        try {
+          const data: PersistedStats = JSON.parse(readFileSync(join(STATS_DIR, file), "utf-8"));
+          agg.cacheRead += data.cacheRead ?? 0;
+          agg.input += data.input ?? 0;
+          agg.cacheWrite += data.cacheWrite ?? 0;
+          agg.turns += data.turns ?? 0;
+          sessionCount++;
+        } catch {
+          // skip corrupted files
+        }
+      }
+    }
+  } catch {
+    // best-effort
+  }
+  return { ...agg, sessionCount };
+}
+
+function scheduleSaveStats(s: PersistedStats, sid: string) {
+  if (!sid) return;
+  pendingStats = s;
+  if (statsTimer) return;
+  statsTimer = setTimeout(() => {
+    statsTimer = null;
+    const data = pendingStats;
+    pendingStats = null;
+    if (!data) return;
+    (async () => {
+      try {
+        if (!existsSync(STATS_DIR)) mkdirSync(STATS_DIR, { recursive: true });
+        await writeFile(statsPath(sid), JSON.stringify(data, null, 2));
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        extensionCtx?.ui.notify(`[deepseek-cache] stats save failed: ${msg}`, "error");
+      }
+    })();
+  }, WRITE_DEBOUNCE_MS);
+}
+
+function scheduleSaveHistory(h: HistoryPoint[], sid: string) {
+  if (!sid) return;
+  pendingHistory = h;
+  if (historyTimer) return;
+  historyTimer = setTimeout(() => {
+    historyTimer = null;
+    const data = pendingHistory;
+    pendingHistory = null;
+    if (!data) return;
+    (async () => {
+      try {
+        if (!existsSync(STATS_DIR)) mkdirSync(STATS_DIR, { recursive: true });
+        await writeFile(historyPath(sid), JSON.stringify(data.slice(-MAX_HISTORY_POINTS), null, 2));
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        extensionCtx?.ui.notify(`[deepseek-cache] history save failed: ${msg}`, "error");
+      }
+    })();
+  }, WRITE_DEBOUNCE_MS);
+}
+
+function flushPendingWrites(sid: string) {
   if (statsTimer) { clearTimeout(statsTimer); statsTimer = null; }
-  if (pendingStats) {
+  if (pendingStats && sid) {
     try {
       if (!existsSync(STATS_DIR)) mkdirSync(STATS_DIR, { recursive: true });
-      writeFileSync(STATS_FILE, JSON.stringify(pendingStats, null, 2));
+      writeFileSync(statsPath(sid), JSON.stringify(pendingStats, null, 2));
     } catch { /* best-effort */ }
     pendingStats = null;
   }
   if (historyTimer) { clearTimeout(historyTimer); historyTimer = null; }
-  if (pendingHistory) {
+  if (pendingHistory && sid) {
     try {
       if (!existsSync(STATS_DIR)) mkdirSync(STATS_DIR, { recursive: true });
-      writeFileSync(HISTORY_FILE, JSON.stringify(pendingHistory.slice(-MAX_HISTORY_POINTS), null, 2));
+      writeFileSync(historyPath(sid), JSON.stringify(pendingHistory.slice(-MAX_HISTORY_POINTS), null, 2));
     } catch { /* best-effort */ }
     pendingHistory = null;
   }
@@ -201,44 +251,49 @@ function flushPendingWrites() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 class CacheStatsOverlay implements Focusable {
-  readonly width = 54;
+  readonly width = 58;
   focused = false;
   private stats: PersistedStats;
+  private aggregate?: PersistedStats & { sessionCount: number };
   private theme: any;
   private done: () => void;
 
-  constructor(theme: any, stats: PersistedStats, done: () => void) {
+  constructor(
+    theme: any,
+    stats: PersistedStats,
+    done: () => void,
+    aggregate?: PersistedStats & { sessionCount: number },
+  ) {
     this.theme = theme;
     this.stats = stats;
     this.done = done;
+    this.aggregate = aggregate;
   }
 
   handleInput(data: string): void {
     if (matchesKey(data, "escape") || matchesKey(data, "return")) this.done();
   }
 
-  render(_width: number): string[] {
-    const { cacheRead, input, cacheWrite, turns } = this.stats;
-    const totalPrompt = cacheRead + input + cacheWrite;
-    const hitRate = totalPrompt ? ((cacheRead / totalPrompt) * 100).toFixed(1) : "0.0";
-    const saved = (cacheRead / 1_000_000) * (COST_PER_M_INPUT - COST_PER_M_CACHE_READ);
-    const savedStr = saved >= 0.01 ? `$${saved.toFixed(2)}` : "< $0.01";
+  private sectionBlock(
+    title: string,
+    s: PersistedStats,
+    turnsLabel?: string,
+  ): string[] {
     const th = this.theme;
-    const w = this.width;
-    const inner = w - 2;
-
-    // For DeepSeek: input = prompt_cache_miss_tokens, cacheWrite is always 0.
-    // For Anthropic/OpenRouter: cacheWrite holds actual cache write tokens.
-    const showCacheWrite = cacheWrite > 0;
-
+    const inner = this.width - 2;
+    const { cacheRead, input, cacheWrite, turns } = s;
+    const hitRate = calcHitRate(cacheRead, input, cacheWrite).toFixed(1);
+    const saved = estimateSavings(cacheRead);
+    const savedStr = saved >= 0.01 ? `$${saved.toFixed(2)}` : "< $0.01";
     const pad = (s: string) => s + " ".repeat(Math.max(0, inner - visibleWidth(s)));
     const row = (s: string) => th.fg("border", "│") + pad(s) + th.fg("border", "│");
     const label = (k: string, v: string) =>
       `  ${th.fg("dim", k.padEnd(18))}${th.fg("accent", v)}`;
+    const showCacheWrite = cacheWrite > 0;
+    const turnStr = turnsLabel ?? `${turns}`;
 
     const rows: string[] = [
-      th.fg("border", `╭${"─".repeat(inner)}╮`),
-      row(` ${th.fg("accent", "⚡ DeepSeek Cache Stats")}`),
+      row(` ${th.fg("accent", title)}`),
       row(""),
       row(label("Hit rate", `${hitRate}%`)),
       row(label("Cache hits", `${cacheRead.toLocaleString()} tokens`)),
@@ -250,14 +305,46 @@ class CacheStatsOverlay implements Focusable {
 
     rows.push(
       row(label("Cache misses", `${input.toLocaleString()} tokens`)),
-      row(label("Turns", `${turns}`)),
+      row(label("Turns", turnStr)),
       row(label("Est. savings", `${th.fg("accent", savedStr)}`)),
-      row(""),
-      row(` ${th.fg("dim", "Esc / Enter to close")}`),
-      th.fg("border", `╰${"─".repeat(inner)}╯`),
     );
 
     return rows;
+  }
+
+  render(_width: number): string[] {
+    const th = this.theme;
+    const inner = this.width - 2;
+    const pad = (s: string) => s + " ".repeat(Math.max(0, inner - visibleWidth(s)));
+    const row = (s: string) => th.fg("border", "│") + pad(s) + th.fg("border", "│");
+
+    const lines: string[] = [
+      th.fg("border", `╭${"─".repeat(inner)}╮`),
+      ...this.sectionBlock("⚡ This Session", this.stats),
+    ];
+
+    if (this.aggregate && this.aggregate.sessionCount > 1) {
+      lines.push(row(""));
+      lines.push(row(` ${th.fg("dim", `─── All Sessions (${this.aggregate.sessionCount}) ───`)}`));
+      lines.push(
+        ...this.sectionBlock(
+          "📊 Aggregate",
+          {
+            cacheRead: this.aggregate.cacheRead,
+            input: this.aggregate.input,
+            cacheWrite: this.aggregate.cacheWrite,
+            turns: this.aggregate.turns,
+          },
+          `${this.aggregate.turns}`,
+        ),
+      );
+    }
+
+    lines.push(row(""));
+    lines.push(row(` ${th.fg("dim", "Esc / Enter to close")}`));
+    lines.push(th.fg("border", `╰${"─".repeat(inner)}╯`));
+
+    return lines;
   }
 
   invalidate(): void {}
@@ -345,6 +432,7 @@ class CacheGraphOverlay implements Focusable {
       if (pos >= 0 && pos < chartW) xChars[pos] = last[i];
     }
     chart.push("    " + xChars.join(""));
+    chart.push("    Turn →");
 
     const lines = [
       th.fg("border", `╭${"─".repeat(inner)}╮`),
@@ -368,17 +456,15 @@ class CacheGraphOverlay implements Focusable {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export default function (pi: ExtensionAPI) {
-  // ────── P1: Restore persisted state ──────
-  const persisted = loadStats();
-  let cacheRead = persisted.cacheRead;
-  let input = persisted.input;
-  let cacheWrite = persisted.cacheWrite;
-  let turns = persisted.turns;
+  // ────── P1: Per-session runtime state (counters start at 0) ──────
+  let sessionId = "";
+  let cacheRead = 0;
+  let input = 0;
+  let cacheWrite = 0;
+  let turns = 0;
 
-  const hitRateHistory = loadHistory();
-  let lastHitRate = hitRateHistory.length > 0
-    ? hitRateHistory[hitRateHistory.length - 1].hitRate
-    : 0;
+  const hitRateHistory: HistoryPoint[] = [];
+  let lastHitRate = 0;
 
   // ────── P0: Session fingerprint ──────
   let sessionDate = todayISO();
@@ -386,8 +472,8 @@ export default function (pi: ExtensionAPI) {
 
   // ────── P2: Prefix guard state ──────
   let lastPrefixHash: string | undefined;
+  let lastWarnedHash: string | undefined;
   let prefixBreaks = 0;
-  let hashChangeWarned = false;
 
   // ────── P3: Summary cache ──────
   const summaryCache = loadSummaryCache();
@@ -401,15 +487,27 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     setCtx(ctx);
+
+    // Get per-session ID
+    sessionId = ctx.sessionManager?.getSessionId?.() ?? "";
+
+    // Reset all counters for fresh session
+    cacheRead = 0;
+    input = 0;
+    cacheWrite = 0;
+    turns = 0;
+    hitRateHistory.length = 0;
+    lastHitRate = 0;
+
+    // P0
     sessionDate = todayISO();
     sessionCwd = ctx.cwd;
     lastPrefixHash = undefined;
+    lastWarnedHash = undefined;
     prefixBreaks = 0;
-    hashChangeWarned = false;
 
-    if (ctx.hasUI) {
-      ctx.ui.setStatus("cache", "Cache: warming up…");
-    }
+    // Cleanup old session files
+    cleanupOldSessions();
   });
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -417,7 +515,7 @@ export default function (pi: ExtensionAPI) {
   // ═══════════════════════════════════════════════════════════════════════
 
   pi.on("session_shutdown", async (_event, ctx) => {
-    flushPendingWrites();
+    flushPendingWrites(sessionId);
     if (ctx.hasUI) ctx.ui.setStatus("cache", undefined);
   });
 
@@ -432,18 +530,12 @@ export default function (pi: ExtensionAPI) {
     let prompt = event.systemPrompt;
     let changed = false;
 
-    const dateMatch = prompt.match(DATE_LINE_RE);
-    if (dateMatch) {
-      const frozenDate = `${sessionDate} (frozen)`;
-      if (dateMatch[1] !== sessionDate || !dateMatch[0].includes("(frozen)")) {
-        prompt = prompt.replace(DATE_LINE_RE, `Current date: ${frozenDate}`);
-        changed = true;
-      }
+    if (!isDateFrozen(prompt, sessionDate)) {
+      prompt = applyDateFreeze(prompt, sessionDate);
+      changed = true;
     }
-
-    const cwdMatch = prompt.match(CWD_LINE_RE);
-    if (cwdMatch && cwdMatch[1] !== sessionCwd) {
-      prompt = prompt.replace(CWD_LINE_RE, `Current working directory: ${sessionCwd}`);
+    if (!isCwdFrozen(prompt, sessionCwd)) {
+      prompt = applyCwdFreeze(prompt, sessionCwd);
       changed = true;
     }
 
@@ -451,7 +543,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ═══════════════════════════════════════════════════════════════════════
-  // P1: message_end — accumulate cache stats
+  // P1: message_end — accumulate cache stats (per-session)
   // ═══════════════════════════════════════════════════════════════════════
 
   pi.on("message_end", async (event, ctx) => {
@@ -466,16 +558,15 @@ export default function (pi: ExtensionAPI) {
     turns += 1;
 
     const stats: PersistedStats = { cacheRead, input, cacheWrite, turns };
-    scheduleSaveStats(stats);
+    scheduleSaveStats(stats, sessionId);
 
     // Use total prompt tokens as denominator for accurate hit rate.
     // For DeepSeek: cacheWrite=0, input=miss_tokens → total=prompt_tokens.
     // For Anthropic: cacheWrite holds actual writes, included in total.
-    const totalPrompt = cacheRead + input + cacheWrite;
-    const rate = totalPrompt > 0 ? (cacheRead / totalPrompt) * 100 : 0;
+    const rate = calcHitRate(cacheRead, input, cacheWrite);
 
     if (ctx.hasUI) {
-      ctx.ui.setStatus("cache", `Cache: ${rate.toFixed(1)}% · ${turns}t · ${formatTokens(cacheRead)}R`);
+      ctx.ui.setStatus("cache", ctx.ui.theme.fg("dim", `Cache ${rate.toFixed(1)}%`));
     }
 
     // Track history on rate change
@@ -487,7 +578,7 @@ export default function (pi: ExtensionAPI) {
         hitRateHistory.splice(0, hitRateHistory.length - MAX_HISTORY_POINTS);
       }
       lastHitRate = rate;
-      scheduleSaveHistory(hitRateHistory);
+      scheduleSaveHistory(hitRateHistory, sessionId);
     }
   });
 
@@ -508,9 +599,9 @@ export default function (pi: ExtensionAPI) {
       .update(JSON.stringify(msgs.slice(0, -1)))
       .digest("hex");
 
-    if (lastPrefixHash !== undefined && currentHash !== lastPrefixHash && !hashChangeWarned) {
+    if (lastPrefixHash !== undefined && currentHash !== lastPrefixHash && lastWarnedHash !== lastPrefixHash) {
+      lastWarnedHash = lastPrefixHash;
       prefixBreaks++;
-      hashChangeWarned = true;
       if (ctx.hasUI) {
         ctx.ui.notify(
           `⚠️ Cache prefix changed (break #${prefixBreaks}) — hit rate may drop this turn`,
@@ -527,7 +618,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_before_compact", async (event, ctx) => {
     setCtx(ctx);
-    flushPendingWrites();
+    flushPendingWrites(sessionId);
 
     const { preparation, signal } = event;
     const { messagesToSummarize, firstKeptEntryId, tokensBefore, previousSummary } = preparation;
@@ -568,9 +659,15 @@ export default function (pi: ExtensionAPI) {
     description: "DeepSeek cache hit rate statistics",
     handler: async (_args, ctx) => {
       setCtx(ctx);
+      const agg = aggregateAllSessions();
       await ctx.ui.custom(
         (_tui, theme, _kb, done) =>
-          new CacheStatsOverlay(theme, { cacheRead, input, cacheWrite, turns }, done),
+          new CacheStatsOverlay(
+            theme,
+            { cacheRead, input, cacheWrite, turns },
+            done,
+            agg,
+          ),
         { overlay: true },
       );
     },
@@ -592,6 +689,7 @@ export default function (pi: ExtensionAPI) {
     description: "Reset DeepSeek cache statistics",
     handler: async (_args, ctx) => {
       setCtx(ctx);
+      // Reset in-memory counters
       cacheRead = 0;
       input = 0;
       cacheWrite = 0;
@@ -599,16 +697,31 @@ export default function (pi: ExtensionAPI) {
       hitRateHistory.length = 0;
       lastHitRate = 0;
       lastPrefixHash = undefined;
+      lastWarnedHash = undefined;
       prefixBreaks = 0;
-      hashChangeWarned = false;
       summaryCache.clear();
-      flushPendingWrites();
+
+      // Clear pending writes without flushing to disk (files get deleted below)
+      if (statsTimer) { clearTimeout(statsTimer); statsTimer = null; }
+      pendingStats = null;
+      if (historyTimer) { clearTimeout(historyTimer); historyTimer = null; }
+      pendingHistory = null;
+
+      // Delete ALL session files
       try {
-        if (existsSync(STATS_FILE)) unlinkSync(STATS_FILE);
-        if (existsSync(HISTORY_FILE)) unlinkSync(HISTORY_FILE);
+        if (existsSync(STATS_DIR)) {
+          const files = readdirSync(STATS_DIR);
+          for (const file of files) {
+            if ((file.startsWith("stats-") && file.endsWith(".json")) ||
+                (file.startsWith("history-") && file.endsWith(".json"))) {
+              try { unlinkSync(join(STATS_DIR, file)); } catch { /* best-effort */ }
+            }
+          }
+        }
         if (existsSync(SUMMARY_CACHE_FILE)) unlinkSync(SUMMARY_CACHE_FILE);
       } catch { /* best-effort */ }
       ctx.ui.notify("Cache stats reset", "info");
+      if (ctx.hasUI) ctx.ui.setStatus("cache", undefined);
     },
   });
 }

@@ -1,10 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
   isDeepSeekModel,
-  formatTokens,
   todayISO,
   calcHitRate,
-  formatHitRate,
   estimateSavings,
 } from "../lib/helpers.js";
 
@@ -47,37 +45,6 @@ describe("isDeepSeekModel", () => {
     expect(isDeepSeekModel({ id: "gpt-4o", provider: "openai" })).toBe(false);
     expect(isDeepSeekModel({ id: "mimo-v2.5", provider: "xiaomi" })).toBe(false);
     expect(isDeepSeekModel({ id: "mimo-v2.5", provider: "nan" })).toBe(false);
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// formatTokens
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe("formatTokens", () => {
-  it("formats small numbers as-is", () => {
-    expect(formatTokens(0)).toBe("0");
-    expect(formatTokens(1)).toBe("1");
-    expect(formatTokens(999)).toBe("999");
-  });
-
-  it("formats thousands with K suffix", () => {
-    expect(formatTokens(1_000)).toBe("1.0K");
-    expect(formatTokens(1_500)).toBe("1.5K");
-    expect(formatTokens(45_200)).toBe("45.2K");
-    expect(formatTokens(999_999)).toBe("1000.0K");
-  });
-
-  it("formats millions with M suffix", () => {
-    expect(formatTokens(1_000_000)).toBe("1.0M");
-    expect(formatTokens(2_500_000)).toBe("2.5M");
-    expect(formatTokens(150_000_000)).toBe("150.0M");
-  });
-
-  it("handles edge cases", () => {
-    expect(formatTokens(1_000)).toBe("1.0K");
-    expect(formatTokens(1_049)).toBe("1.0K"); // rounds down
-    expect(formatTokens(1_050)).toBe("1.1K"); // rounds up
   });
 });
 
@@ -163,30 +130,6 @@ describe("calcHitRate", () => {
     expect(calcHitRate(2000, 1000, 0)).toBeGreaterThan(50);
     expect(calcHitRate(0, 0, 0)).toBe(0);
     expect(calcHitRate(100, 0, 0)).toBe(100);
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// formatHitRate
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe("formatHitRate", () => {
-  it("formats high rates with one decimal", () => {
-    expect(formatHitRate(95)).toBe("95.0%");
-    expect(formatHitRate(99.9)).toBe("99.9%");
-    expect(formatHitRate(100)).toBe("100.0%");
-  });
-
-  it("formats medium rates without decimals", () => {
-    expect(formatHitRate(50)).toBe("50%");
-    expect(formatHitRate(87.3)).toBe("87%");
-    expect(formatHitRate(94.9)).toBe("95%");
-  });
-
-  it("formats low rates without decimals", () => {
-    expect(formatHitRate(0)).toBe("0%");
-    expect(formatHitRate(12.7)).toBe("13%");
-    expect(formatHitRate(49.9)).toBe("50%");
   });
 });
 

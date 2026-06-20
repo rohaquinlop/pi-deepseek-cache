@@ -1,6 +1,10 @@
 /**
  * Pure helpers for the deepseek-cache extension.
  * Extracted for testability — no pi runtime dependencies.
+ *
+ * Used by the extension: isDeepSeekModel, todayISO, DATE_LINE_RE, CWD_LINE_RE,
+ * calcHitRate, estimateSavings, isDateFrozen, isCwdFrozen, applyDateFreeze, applyCwdFreeze.
+ * The remaining exports (frozenDate, frozenCwd) are used internally by the freeze helpers.
  */
 
 /**
@@ -15,15 +19,6 @@ export function isDeepSeekModel(model: { id: string; provider: string } | undefi
   // model IDs don't use the deepseek- prefix.
   if (model.provider === "deepseek") return true;
   return false;
-}
-
-/**
- * Format a token count with K/M suffix.
- */
-export function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return String(n);
 }
 
 /**
@@ -44,15 +39,6 @@ export function todayISO(): string {
 export function calcHitRate(cacheRead: number, input: number, cacheWrite: number = 0): number {
   const denom = cacheRead + input + cacheWrite;
   return denom > 0 ? (cacheRead / denom) * 100 : 0;
-}
-
-/**
- * Format a hit rate number as a display string.
- */
-export function formatHitRate(rate: number): string {
-  if (rate >= 95) return `${rate.toFixed(1)}%`;
-  if (rate >= 50) return `${rate.toFixed(0)}%`;
-  return `${rate.toFixed(0)}%`;
 }
 
 /**

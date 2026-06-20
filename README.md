@@ -13,7 +13,7 @@ Pi's default system prompt embeds `Current date: YYYY-MM-DD` and `Current workin
 | Layer | Feature | Impact |
 |-------|---------|--------|
 | **P0** | Date & CWD freeze | Root-cause fix — locks session date and directory, preventing daily/per-session cache bust |
-| **P1** | Hit-rate telemetry | Persistent stats with real-time status bar: `Cache: 93.5% · 12t · 45KR` |
+| **P1** | Hit-rate telemetry | Per-session hit rate shown as dimmed footer status line; /cache-stats & /cache-graph for detail |
 | **P2** | Prefix guard | SHA-256 hash diagnostics — warns when prompt prefix changes between turns |
 | **P3** | Cache-friendly compaction | Deterministic summarization via deepseek-v4-flash at temperature 0, SHA-256 cached for stable replays |
 | **P4** | TUI overlays | `/cache-stats` popup with hit rate, tokens, cost savings. `/cache-graph` ASCII trend chart |
@@ -37,7 +37,14 @@ Or via git:
 pi install git:github.com/rohaquinlop/pi-deepseek-cache
 ```
 
-The extension activates automatically. No configuration needed.
+The extension activates automatically. No configuration needed. The per-session
+cache hit rate appears as a dimmed status line (`Cache 96.2%`) in Pi's footer.
+Pi's native `CH:XX.X%` shows the per-turn rate in the stats line. Detailed
+stats are available via /cache-stats and /cache-graph commands.
+
+Each pi session writes its own `stats-{sessionId}.json` and
+`history-{sessionId}.json` files, so concurrent sessions never race on the
+same file. Session files older than 30 days are cleaned up automatically.
 
 ## Provider Support
 
@@ -50,19 +57,19 @@ Non-DeepSeek models pass through unchanged.
 ## Commands
 
 ### `/cache-stats`
-Overlay popup showing cumulative session stats: hit rate, cache read/write/input tokens, turns, and estimated cost savings.
+Overlay popup showing two sections: **this session's** stats and an **aggregate across all sessions** (N sessions). Each section shows hit rate, cache read/write/input tokens, turns, and estimated cost savings.
 
 ### `/cache-graph`
 ASCII trend chart of hit rate over turns — helps spot regressions.
 
 ### `/cache-reset`
-Clears all cached statistics, history, and summary cache. Useful after major prompt changes.
+Clears all cached statistics, history, and summary cache — deletes all per-session `stats-*.json` and `history-*.json` files plus the summary cache. Useful after major prompt changes.
 
 ## How It Works
 
 **P0 (Date/CWD freeze):** On `before_agent_start`, replaces the dynamic `Current date` and `Current working directory` lines with values frozen at session start. The system prompt prefix stays byte-identical across the entire session.
 
-**P1 (Telemetry):** Accumulates `cacheRead`, `input`, `cacheWrite`, and `turns` from every assistant message's usage data. Persists to `~/.pi/agent/extensions/deepseek-cache/stats.json` so stats survive `/reload` and restart.
+**P1 (Telemetry):** Accumulates `cacheRead`, `input`, `cacheWrite`, and `turns` from every assistant message's usage data. Each session stores its stats in `stats-{sessionId}.json` so concurrent sessions never race. `/cache-stats` shows both this session's stats and an aggregate across all sessions.
 
 **P2 (Prefix guard):** On `before_provider_request`, SHA-256 hashes all messages except the last to fingerprint the prefix. Warns when the hash changes — diagnosing what busted the cache.
 
