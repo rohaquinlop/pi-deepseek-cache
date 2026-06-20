@@ -9,6 +9,7 @@
     "type": "git",
     "url": "git+https://github.com/rohaquinlop/pi-deepseek-cache.git"
   },
+  "files": ["extensions/", "lib/", "README.md"],
   "pi": {
     "extensions": ["./extensions/index.ts"]
   },
@@ -16,5 +17,12 @@
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.0"
   }
 }

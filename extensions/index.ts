@@ -37,6 +37,13 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "
 import { writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import {
+  isDeepSeekModel,
+  formatTokens,
+  todayISO,
+  DATE_LINE_RE,
+  CWD_LINE_RE,
+} from "../lib/helpers.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Constants
@@ -343,31 +350,6 @@ class CacheGraphOverlay implements Focusable {
   invalidate(): void {}
   dispose(): void {}
 }
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Helpers
-// ═══════════════════════════════════════════════════════════════════════════
-
-function isDeepSeekModel(model: { id: string; provider: string } | undefined): boolean {
-  if (!model) return false;
-  if (model.provider === "nan") return true;
-  if (model.provider === "deepseek") return true;
-  if (model.id.toLowerCase().startsWith("deepseek-")) return true;
-  return false;
-}
-
-function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return String(n);
-}
-
-function todayISO(): string {
-  return new Date().toISOString().split("T")[0];
-}
-
-const DATE_LINE_RE = /Current date: (\d{4}-\d{2}-\d{2})(?: \(frozen\))?/;
-const CWD_LINE_RE = /Current working directory: (.+?)\s*$/;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Extension
