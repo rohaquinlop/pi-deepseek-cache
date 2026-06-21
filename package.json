@@ -11,7 +11,8 @@
   },
   "files": ["extensions/", "lib/", "README.md"],
   "pi": {
-    "extensions": ["./extensions/index.ts"]
+    "extensions": ["./extensions/index.ts"],
+    "appliesToModels": ["deepseek-*", "deepseek"]
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

@@ -14,7 +14,7 @@ Pi's default system prompt embeds `Current date: YYYY-MM-DD` and `Current workin
 |-------|---------|--------|
 | **P0** | Date & CWD freeze | Root-cause fix — locks session date and directory, preventing daily/per-session cache bust |
 | **P1** | Hit-rate telemetry | Per-session hit rate shown as dimmed footer status line; /cache-stats & /cache-graph for detail |
-| **P2** | Prefix guard | SHA-256 hash diagnostics — warns when prompt prefix changes between turns |
+| **P2** | Prefix guard | SHA-256 hash diagnostics — tracks prefix breaks (viewable in /cache-stats) |
 | **P3** | Cache-friendly compaction | Deterministic summarization via deepseek-v4-flash at temperature 0, SHA-256 cached for stable replays |
 | **P4** | TUI overlays | `/cache-stats` popup with hit rate, tokens, cost savings. `/cache-graph` ASCII trend chart |
 
@@ -54,6 +54,20 @@ Works with any provider serving DeepSeek models:
 
 Non-DeepSeek models pass through unchanged.
 
+## Subagent Compatibility
+
+This extension automatically applies to subagent processes that use DeepSeek
+models. It declares `appliesToModels: ["deepseek-*", "deepseek"]` in its
+`package.json`, which the [pi-subagents](https://github.com/rohaquinlop/pi-subagents)
+extension detects and loads into child processes — no configuration needed.
+
+For the best cache performance, ensure both extensions are installed:
+
+```bash
+pi install npm:@rohaquinlop/pi-subagents
+pi install npm:@rohaquinlop/pi-deepseek-cache
+```
+
 ## Commands
 
 ### `/cache-stats`
@@ -71,7 +85,7 @@ Clears all cached statistics, history, and summary cache — deletes all per-ses
 
 **P1 (Telemetry):** Accumulates `cacheRead`, `input`, `cacheWrite`, and `turns` from every assistant message's usage data. Each session stores its stats in `stats-{sessionId}.json` so concurrent sessions never race. `/cache-stats` shows both this session's stats and an aggregate across all sessions.
 
-**P2 (Prefix guard):** On `before_provider_request`, SHA-256 hashes all messages except the last to fingerprint the prefix. Warns when the hash changes — diagnosing what busted the cache.
+**P2 (Prefix guard):** On `before_provider_request`, SHA-256 hashes all messages except the last to fingerprint the prefix. Tracks when the hash changes — the break count is visible in `/cache-stats`.
 
 **P3 (Compaction):** On `session_before_compact`, summarizes conversation history with deepseek-v4-flash at temperature 0. Summaries are SHA-256 hashed and cached — identical histories produce byte-identical summaries, keeping compaction cache-stable.
 
