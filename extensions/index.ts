@@ -255,6 +255,7 @@ class CacheStatsOverlay implements Focusable {
   focused = false;
   private stats: PersistedStats;
   private aggregate?: PersistedStats & { sessionCount: number };
+  private prefixBreaks = 0;
   private theme: any;
   private done: () => void;
 
@@ -263,11 +264,13 @@ class CacheStatsOverlay implements Focusable {
     stats: PersistedStats,
     done: () => void,
     aggregate?: PersistedStats & { sessionCount: number },
+    prefixBreaks?: number,
   ) {
     this.theme = theme;
     this.stats = stats;
     this.done = done;
     this.aggregate = aggregate;
+    if (prefixBreaks !== undefined) this.prefixBreaks = prefixBreaks;
   }
 
   handleInput(data: string): void {
@@ -341,6 +344,9 @@ class CacheStatsOverlay implements Focusable {
     }
 
     lines.push(row(""));
+    if (this.prefixBreaks > 0) {
+      lines.push(row(`  ${th.fg("dim", "Prefix breaks".padEnd(18))}${th.fg("accent", String(this.prefixBreaks))}`));
+    }
     lines.push(row(` ${th.fg("dim", "Esc / Enter to close")}`));
     lines.push(th.fg("border", `╰${"─".repeat(inner)}╯`));
 
@@ -472,7 +478,7 @@ export default function (pi: ExtensionAPI) {
 
   // ────── P2: Prefix guard state ──────
   let lastPrefixHash: string | undefined;
-  let lastWarnedHash: string | undefined;
+  let warnedThisTurn = false;
   let prefixBreaks = 0;
 
   // ────── P3: Summary cache ──────
@@ -503,7 +509,7 @@ export default function (pi: ExtensionAPI) {
     sessionDate = todayISO();
     sessionCwd = ctx.cwd;
     lastPrefixHash = undefined;
-    lastWarnedHash = undefined;
+    warnedThisTurn = false;
     prefixBreaks = 0;
 
     // Cleanup old session files
@@ -583,6 +589,14 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ═══════════════════════════════════════════════════════════════════════
+  // turn_end — reset prefix guard for the next turn
+  // ═══════════════════════════════════════════════════════════════════════
+
+  pi.on("turn_end", (_event, _ctx) => {
+    warnedThisTurn = false;
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
   // P2: before_provider_request — prefix hash diagnostics
   // ═══════════════════════════════════════════════════════════════════════
 
@@ -595,19 +609,16 @@ export default function (pi: ExtensionAPI) {
     if (msgs.length === 0) return;
 
     // Hash all messages except the last (which is the current user message)
-    const currentHash = createHash("sha256")
-      .update(JSON.stringify(msgs.slice(0, -1)))
-      .digest("hex");
+    let currentHash: string;
+    try {
+      currentHash = createHash("sha256")
+        .update(JSON.stringify(msgs.slice(0, -1)))
+        .digest("hex");
+    } catch { return; }
 
-    if (lastPrefixHash !== undefined && currentHash !== lastPrefixHash && lastWarnedHash !== lastPrefixHash) {
-      lastWarnedHash = lastPrefixHash;
+    if (lastPrefixHash !== undefined && currentHash !== lastPrefixHash && !warnedThisTurn) {
+      warnedThisTurn = true;
       prefixBreaks++;
-      if (ctx.hasUI) {
-        ctx.ui.notify(
-          `⚠️ Cache prefix changed (break #${prefixBreaks}) — hit rate may drop this turn`,
-          "warning",
-        );
-      }
     }
     lastPrefixHash = currentHash;
   });
@@ -618,13 +629,11 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_before_compact", async (event, ctx) => {
     setCtx(ctx);
-    flushPendingWrites(sessionId);
-
-    const { preparation, signal } = event;
-    const { messagesToSummarize, firstKeptEntryId, tokensBefore, previousSummary } = preparation;
 
     // Only intercept if we're on a DeepSeek model
     if (!isDeepSeekModel(ctx.model)) return;
+
+    flushPendingWrites(sessionId);
 
     const history = serializeConversation(convertToLlm(messagesToSummarize));
     const text = previousSummary
@@ -667,6 +676,7 @@ export default function (pi: ExtensionAPI) {
             { cacheRead, input, cacheWrite, turns },
             done,
             agg,
+            prefixBreaks,
           ),
         { overlay: true },
       );
@@ -697,7 +707,7 @@ export default function (pi: ExtensionAPI) {
       hitRateHistory.length = 0;
       lastHitRate = 0;
       lastPrefixHash = undefined;
-      lastWarnedHash = undefined;
+      warnedThisTurn = false;
       prefixBreaks = 0;
       summaryCache.clear();
 
