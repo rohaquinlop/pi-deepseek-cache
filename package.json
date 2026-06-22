@@ -1,6 +1,6 @@
 {
   "name": "@rohaquinlop/pi-deepseek-cache",
-  "version": "1.4.0",
+  "version": "0.5.0",
   "description": "DeepSeek prefix cache optimization for pi — date/CWD freeze, hit-rate telemetry, cache-friendly compaction, and TUI overlays",
   "keywords": ["pi-package", "deepseek", "cache", "prefix-cache", "coding-agent", "extension"],
   "license": "MIT",
