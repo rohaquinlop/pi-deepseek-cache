@@ -32,12 +32,30 @@
  */
 
 import { complete } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
-import { matchesKey, visibleWidth, type Focusable } from "@earendil-works/pi-tui";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
+import {
+  convertToLlm,
+  serializeConversation,
+} from "@earendil-works/pi-coding-agent";
+import {
+  matchesKey,
+  visibleWidth,
+  type Focusable,
+} from "@earendil-works/pi-tui";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -55,15 +73,20 @@ import {
 // Constants
 // ═══════════════════════════════════════════════════════════════════════════
 
-const STATS_DIR = join(homedir(), ".pi", "agent", "extensions", "deepseek-cache");
+const STATS_DIR = join(
+  homedir(),
+  ".pi",
+  "agent",
+  "extensions",
+  "deepseek-cache",
+);
 const SUMMARY_CACHE_FILE = join(STATS_DIR, "summary-cache.json");
 
 const SUMMARY_MAX_TOKENS = 8192;
 const MAX_HISTORY_POINTS = 100;
 const WRITE_DEBOUNCE_MS = 1000;
 const MAX_SESSION_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
-
-
+const SUMMARY_CACHE_MAX_ENTRIES = 500;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Types
@@ -109,7 +132,9 @@ function historyPath(sessionId: string): string {
 function loadSummaryCache(): Map<string, string> {
   try {
     if (existsSync(SUMMARY_CACHE_FILE)) {
-      return new Map(Object.entries(JSON.parse(readFileSync(SUMMARY_CACHE_FILE, "utf-8"))));
+      return new Map(
+        Object.entries(JSON.parse(readFileSync(SUMMARY_CACHE_FILE, "utf-8"))),
+      );
     }
   } catch {
     // silent — summary cache is best-effort
@@ -128,6 +153,13 @@ function saveSummaryCacheSync(cache: Map<string, string>) {
   }
 }
 
+function evictSummaryCacheIfNeeded(cache: Map<string, string>): void {
+  while (cache.size > SUMMARY_CACHE_MAX_ENTRIES) {
+    const firstKey = cache.keys().next().value;
+    if (firstKey) cache.delete(firstKey);
+  }
+}
+
 /**
  * Delete stats-*.json and history-*.json files older than 30 days.
  */
@@ -137,8 +169,10 @@ function cleanupOldSessions() {
     const cutoff = Date.now() - MAX_SESSION_AGE_MS;
     const files = readdirSync(STATS_DIR);
     for (const file of files) {
-      if ((file.startsWith("stats-") && file.endsWith(".json")) ||
-          (file.startsWith("history-") && file.endsWith(".json"))) {
+      if (
+        (file.startsWith("stats-") && file.endsWith(".json")) ||
+        (file.startsWith("history-") && file.endsWith(".json"))
+      ) {
         try {
           const filePath = join(STATS_DIR, file);
           const st = statSync(filePath);
@@ -155,12 +189,38 @@ function cleanupOldSessions() {
   }
 }
 
+const CLEANUP_MARKER = ".last-cleanup";
+
+function maybeCleanupOldSessions(): void {
+  try {
+    const markerPath = join(STATS_DIR, CLEANUP_MARKER);
+    const now = Date.now();
+    const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+    if (existsSync(markerPath)) {
+      const lastCleanup = parseInt(readFileSync(markerPath, "utf8"), 10);
+      if (now - lastCleanup < ONE_DAY_MS) return; // skip — cleaned up recently
+    }
+
+    cleanupOldSessions();
+    writeFileSync(markerPath, String(now), "utf8");
+  } catch {
+    // If marker file fails, still run cleanup (best-effort throttling)
+    cleanupOldSessions();
+  }
+}
+
 /**
  * Read all stats-*.json files in STATS_DIR and return summed PersistedStats
  * plus the count of sessions.
  */
 function aggregateAllSessions(): PersistedStats & { sessionCount: number } {
-  const agg: PersistedStats = { cacheRead: 0, input: 0, cacheWrite: 0, turns: 0 };
+  const agg: PersistedStats = {
+    cacheRead: 0,
+    input: 0,
+    cacheWrite: 0,
+    turns: 0,
+  };
   let sessionCount = 0;
   try {
     if (!existsSync(STATS_DIR)) return { ...agg, sessionCount: 0 };
@@ -168,7 +228,9 @@ function aggregateAllSessions(): PersistedStats & { sessionCount: number } {
     for (const file of files) {
       if (file.startsWith("stats-") && file.endsWith(".json")) {
         try {
-          const data: PersistedStats = JSON.parse(readFileSync(join(STATS_DIR, file), "utf-8"));
+          const data: PersistedStats = JSON.parse(
+            readFileSync(join(STATS_DIR, file), "utf-8"),
+          );
           agg.cacheRead += data.cacheRead ?? 0;
           agg.input += data.input ?? 0;
           agg.cacheWrite += data.cacheWrite ?? 0;
@@ -178,6 +240,46 @@ function aggregateAllSessions(): PersistedStats & { sessionCount: number } {
           // skip corrupted files
         }
       }
+    }
+  } catch {
+    // best-effort
+  }
+  return { ...agg, sessionCount };
+}
+
+async function aggregateAllSessionsAsync(): Promise<PersistedStats & { sessionCount: number }> {
+  const agg: PersistedStats = {
+    cacheRead: 0,
+    input: 0,
+    cacheWrite: 0,
+    turns: 0,
+  };
+  let sessionCount = 0;
+  try {
+    if (!existsSync(STATS_DIR)) return { ...agg, sessionCount: 0 };
+    const files = readdirSync(STATS_DIR); // directory listing is fast — sync is fine
+
+    const statsFiles = files.filter(f => f.startsWith("stats-") && f.endsWith(".json"));
+
+    const results = await Promise.all(
+      statsFiles.map(async (file) => {
+        try {
+          const raw = await readFile(join(STATS_DIR, file), "utf8");
+          return JSON.parse(raw) as PersistedStats;
+        } catch {
+          return null;
+        }
+      })
+    );
+
+    const valid = results.filter((r): r is PersistedStats => r !== null);
+
+    for (const data of valid) {
+      agg.cacheRead += data.cacheRead ?? 0;
+      agg.input += data.input ?? 0;
+      agg.cacheWrite += data.cacheWrite ?? 0;
+      agg.turns += data.turns ?? 0;
+      sessionCount++;
     }
   } catch {
     // best-effort
@@ -200,7 +302,10 @@ function scheduleSaveStats(s: PersistedStats, sid: string) {
         await writeFile(statsPath(sid), JSON.stringify(data, null, 2));
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        extensionCtx?.ui.notify(`[deepseek-cache] stats save failed: ${msg}`, "error");
+        extensionCtx?.ui.notify(
+          `[deepseek-cache] stats save failed: ${msg}`,
+          "error",
+        );
       }
     })();
   }, WRITE_DEBOUNCE_MS);
@@ -218,30 +323,49 @@ function scheduleSaveHistory(h: HistoryPoint[], sid: string) {
     (async () => {
       try {
         if (!existsSync(STATS_DIR)) mkdirSync(STATS_DIR, { recursive: true });
-        await writeFile(historyPath(sid), JSON.stringify(data.slice(-MAX_HISTORY_POINTS), null, 2));
+        await writeFile(
+          historyPath(sid),
+          JSON.stringify(data.slice(-MAX_HISTORY_POINTS), null, 2),
+        );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        extensionCtx?.ui.notify(`[deepseek-cache] history save failed: ${msg}`, "error");
+        extensionCtx?.ui.notify(
+          `[deepseek-cache] history save failed: ${msg}`,
+          "error",
+        );
       }
     })();
   }, WRITE_DEBOUNCE_MS);
 }
 
 function flushPendingWrites(sid: string) {
-  if (statsTimer) { clearTimeout(statsTimer); statsTimer = null; }
+  if (statsTimer) {
+    clearTimeout(statsTimer);
+    statsTimer = null;
+  }
   if (pendingStats && sid) {
     try {
       if (!existsSync(STATS_DIR)) mkdirSync(STATS_DIR, { recursive: true });
       writeFileSync(statsPath(sid), JSON.stringify(pendingStats, null, 2));
-    } catch { /* best-effort */ }
+    } catch {
+      /* best-effort */
+    }
     pendingStats = null;
   }
-  if (historyTimer) { clearTimeout(historyTimer); historyTimer = null; }
+  if (historyTimer) {
+    clearTimeout(historyTimer);
+    historyTimer = null;
+  }
   if (pendingHistory && sid) {
     try {
       if (!existsSync(STATS_DIR)) mkdirSync(STATS_DIR, { recursive: true });
-      writeFileSync(historyPath(sid), JSON.stringify(pendingHistory.slice(-MAX_HISTORY_POINTS), null, 2));
-    } catch { /* best-effort */ }
+      writeFileSync(
+        historyPath(sid),
+        JSON.stringify(pendingHistory.slice(-MAX_HISTORY_POINTS), null, 2),
+      );
+    } catch {
+      /* best-effort */
+    }
     pendingHistory = null;
   }
 }
@@ -258,6 +382,7 @@ class CacheStatsOverlay implements Focusable {
   private prefixBreaks = 0;
   private theme: any;
   private done: () => void;
+  private modelId?: string;
 
   constructor(
     theme: any,
@@ -265,12 +390,14 @@ class CacheStatsOverlay implements Focusable {
     done: () => void,
     aggregate?: PersistedStats & { sessionCount: number },
     prefixBreaks?: number,
+    modelId?: string,
   ) {
     this.theme = theme;
     this.stats = stats;
     this.done = done;
     this.aggregate = aggregate;
     if (prefixBreaks !== undefined) this.prefixBreaks = prefixBreaks;
+    if (modelId !== undefined) this.modelId = modelId;
   }
 
   handleInput(data: string): void {
@@ -286,10 +413,12 @@ class CacheStatsOverlay implements Focusable {
     const inner = this.width - 2;
     const { cacheRead, input, cacheWrite, turns } = s;
     const hitRate = calcHitRate(cacheRead, input, cacheWrite).toFixed(1);
-    const saved = estimateSavings(cacheRead);
+    const { saved } = estimateSavings(cacheRead, input, 0, this.modelId);
     const savedStr = saved >= 0.01 ? `$${saved.toFixed(2)}` : "< $0.01";
-    const pad = (s: string) => s + " ".repeat(Math.max(0, inner - visibleWidth(s)));
-    const row = (s: string) => th.fg("border", "│") + pad(s) + th.fg("border", "│");
+    const pad = (s: string) =>
+      s + " ".repeat(Math.max(0, inner - visibleWidth(s)));
+    const row = (s: string) =>
+      th.fg("border", "│") + pad(s) + th.fg("border", "│");
     const label = (k: string, v: string) =>
       `  ${th.fg("dim", k.padEnd(18))}${th.fg("accent", v)}`;
     const showCacheWrite = cacheWrite > 0;
@@ -303,7 +432,9 @@ class CacheStatsOverlay implements Focusable {
     ];
 
     if (showCacheWrite) {
-      rows.push(row(label("Cache writes", `${cacheWrite.toLocaleString()} tokens`)));
+      rows.push(
+        row(label("Cache writes", `${cacheWrite.toLocaleString()} tokens`)),
+      );
     }
 
     rows.push(
@@ -318,8 +449,10 @@ class CacheStatsOverlay implements Focusable {
   render(_width: number): string[] {
     const th = this.theme;
     const inner = this.width - 2;
-    const pad = (s: string) => s + " ".repeat(Math.max(0, inner - visibleWidth(s)));
-    const row = (s: string) => th.fg("border", "│") + pad(s) + th.fg("border", "│");
+    const pad = (s: string) =>
+      s + " ".repeat(Math.max(0, inner - visibleWidth(s)));
+    const row = (s: string) =>
+      th.fg("border", "│") + pad(s) + th.fg("border", "│");
 
     const lines: string[] = [
       th.fg("border", `╭${"─".repeat(inner)}╮`),
@@ -328,7 +461,11 @@ class CacheStatsOverlay implements Focusable {
 
     if (this.aggregate && this.aggregate.sessionCount > 1) {
       lines.push(row(""));
-      lines.push(row(` ${th.fg("dim", `─── All Sessions (${this.aggregate.sessionCount}) ───`)}`));
+      lines.push(
+        row(
+          ` ${th.fg("dim", `─── All Sessions (${this.aggregate.sessionCount}) ───`)}`,
+        ),
+      );
       lines.push(
         ...this.sectionBlock(
           "📊 Aggregate",
@@ -345,7 +482,11 @@ class CacheStatsOverlay implements Focusable {
 
     lines.push(row(""));
     if (this.prefixBreaks > 0) {
-      lines.push(row(`  ${th.fg("dim", "Prefix breaks".padEnd(18))}${th.fg("accent", String(this.prefixBreaks))}`));
+      lines.push(
+        row(
+          `  ${th.fg("dim", "Prefix breaks".padEnd(18))}${th.fg("accent", String(this.prefixBreaks))}`,
+        ),
+      );
     }
     lines.push(row(` ${th.fg("dim", "Esc / Enter to close")}`));
     lines.push(th.fg("border", `╰${"─".repeat(inner)}╯`));
@@ -377,8 +518,10 @@ class CacheGraphOverlay implements Focusable {
   render(_width: number): string[] {
     const th = this.theme;
     const inner = this.width - 2;
-    const pad = (s: string) => s + " ".repeat(Math.max(0, inner - visibleWidth(s)));
-    const row = (s: string) => th.fg("border", "│") + pad(s) + th.fg("border", "│");
+    const pad = (s: string) =>
+      s + " ".repeat(Math.max(0, inner - visibleWidth(s)));
+    const row = (s: string) =>
+      th.fg("border", "│") + pad(s) + th.fg("border", "│");
 
     if (this.history.length < 2) {
       return [
@@ -407,8 +550,12 @@ class CacheGraphOverlay implements Focusable {
     const chart: string[] = [];
     for (let r = chartH; r >= 0; r--) {
       const threshold = minRate + range * (r / chartH);
-      let line = r === chartH ? `${maxRate.toFixed(0)}%`.padStart(4) :
-                 r === 0 ? `${minRate.toFixed(0)}%`.padStart(4) : "    ";
+      let line =
+        r === chartH
+          ? `${maxRate.toFixed(0)}%`.padStart(4)
+          : r === 0
+            ? `${minRate.toFixed(0)}%`.padStart(4)
+            : "    ";
       for (const p of data) {
         line += p.hitRate >= threshold ? "█" : " ";
       }
@@ -442,7 +589,9 @@ class CacheGraphOverlay implements Focusable {
 
     const lines = [
       th.fg("border", `╭${"─".repeat(inner)}╮`),
-      row(` ${th.fg("accent", `⚡ Cache Hit Rate Trend (${this.history.length} points)`)}`),
+      row(
+        ` ${th.fg("accent", `⚡ Cache Hit Rate Trend (${this.history.length} points)`)}`,
+      ),
       row(""),
     ];
     for (const c of chart) lines.push(row(`  ${c}`));
@@ -485,7 +634,9 @@ export default function (pi: ExtensionAPI) {
   const summaryCache = loadSummaryCache();
 
   // ────── Helper: set ctx for persistence error reporting ──────
-  const setCtx = (ctx: ExtensionContext) => { extensionCtx = ctx; };
+  const setCtx = (ctx: ExtensionContext) => {
+    extensionCtx = ctx;
+  };
 
   // ═══════════════════════════════════════════════════════════════════════
   // session_start
@@ -513,7 +664,7 @@ export default function (pi: ExtensionAPI) {
     prefixBreaks = 0;
 
     // Cleanup old session files
-    cleanupOldSessions();
+    maybeCleanupOldSessions();
   });
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -572,14 +723,21 @@ export default function (pi: ExtensionAPI) {
     const rate = calcHitRate(cacheRead, input, cacheWrite);
 
     if (ctx.hasUI) {
-      ctx.ui.setStatus("cache", ctx.ui.theme.fg("dim", `Cache ${rate.toFixed(1)}%`));
+      ctx.ui.setStatus(
+        "cache",
+        ctx.ui.theme.fg("dim", `Cache ${rate.toFixed(1)}%`),
+      );
     }
 
     // Track history on rate change
-    const rateKey = rate.toFixed(1);
-    const lastKey = lastHitRate.toFixed(1);
+    const rateKey = rate.toFixed(2);
+    const lastKey = lastHitRate.toFixed(2);
     if (rateKey !== lastKey) {
-      hitRateHistory.push({ turn: turns, hitRate: rate, timestamp: Date.now() });
+      hitRateHistory.push({
+        turn: turns,
+        hitRate: rate,
+        timestamp: Date.now(),
+      });
       if (hitRateHistory.length > MAX_HISTORY_POINTS) {
         hitRateHistory.splice(0, hitRateHistory.length - MAX_HISTORY_POINTS);
       }
@@ -608,15 +766,26 @@ export default function (pi: ExtensionAPI) {
     const msgs = payload.messages ?? [];
     if (msgs.length === 0) return;
 
-    // Hash all messages except the last (which is the current user message)
+    // P2: Prefix guard — detect cache-breaking mutations
+    // DeepSeek's prefix cache matches from byte position 0 in the prompt.
+    // The prefix is everything BEFORE the new user turn (the current last message).
+    // We hash msgs.slice(0, -1) to check if the prefix (all prior messages)
+    // has changed since last turn. If the hash differs, the cache is broken
+    // and we warn the user.
     let currentHash: string;
     try {
       currentHash = createHash("sha256")
         .update(JSON.stringify(msgs.slice(0, -1)))
         .digest("hex");
-    } catch { return; }
+    } catch {
+      return;
+    }
 
-    if (lastPrefixHash !== undefined && currentHash !== lastPrefixHash && !warnedThisTurn) {
+    if (
+      lastPrefixHash !== undefined &&
+      currentHash !== lastPrefixHash &&
+      !warnedThisTurn
+    ) {
       warnedThisTurn = true;
       prefixBreaks++;
     }
@@ -633,6 +802,8 @@ export default function (pi: ExtensionAPI) {
     // Only intercept if we're on a DeepSeek model
     if (!isDeepSeekModel(ctx.model)) return;
 
+    const { messagesToSummarize, previousSummary, firstKeptEntryId, tokensBefore, signal } = event;
+
     flushPendingWrites(sessionId);
 
     const history = serializeConversation(convertToLlm(messagesToSummarize));
@@ -647,6 +818,7 @@ export default function (pi: ExtensionAPI) {
       summary = await summarizeWithFlash(text, ctx, signal);
       if (!summary) return; // fall back to default compaction
       summaryCache.set(key, summary);
+      evictSummaryCacheIfNeeded(summaryCache);
       saveSummaryCacheSync(summaryCache);
     }
 
@@ -668,7 +840,7 @@ export default function (pi: ExtensionAPI) {
     description: "DeepSeek cache hit rate statistics",
     handler: async (_args, ctx) => {
       setCtx(ctx);
-      const agg = aggregateAllSessions();
+      const agg = await aggregateAllSessionsAsync();
       await ctx.ui.custom(
         (_tui, theme, _kb, done) =>
           new CacheStatsOverlay(
@@ -677,6 +849,7 @@ export default function (pi: ExtensionAPI) {
             done,
             agg,
             prefixBreaks,
+            ctx.model?.id,
           ),
         { overlay: true },
       );
@@ -712,9 +885,15 @@ export default function (pi: ExtensionAPI) {
       summaryCache.clear();
 
       // Clear pending writes without flushing to disk (files get deleted below)
-      if (statsTimer) { clearTimeout(statsTimer); statsTimer = null; }
+      if (statsTimer) {
+        clearTimeout(statsTimer);
+        statsTimer = null;
+      }
       pendingStats = null;
-      if (historyTimer) { clearTimeout(historyTimer); historyTimer = null; }
+      if (historyTimer) {
+        clearTimeout(historyTimer);
+        historyTimer = null;
+      }
       pendingHistory = null;
 
       // Delete ALL session files
@@ -722,14 +901,22 @@ export default function (pi: ExtensionAPI) {
         if (existsSync(STATS_DIR)) {
           const files = readdirSync(STATS_DIR);
           for (const file of files) {
-            if ((file.startsWith("stats-") && file.endsWith(".json")) ||
-                (file.startsWith("history-") && file.endsWith(".json"))) {
-              try { unlinkSync(join(STATS_DIR, file)); } catch { /* best-effort */ }
+            if (
+              (file.startsWith("stats-") && file.endsWith(".json")) ||
+              (file.startsWith("history-") && file.endsWith(".json"))
+            ) {
+              try {
+                unlinkSync(join(STATS_DIR, file));
+              } catch {
+                /* best-effort */
+              }
             }
           }
         }
         if (existsSync(SUMMARY_CACHE_FILE)) unlinkSync(SUMMARY_CACHE_FILE);
-      } catch { /* best-effort */ }
+      } catch {
+        /* best-effort */
+      }
       ctx.ui.notify("Cache stats reset", "info");
       if (ctx.hasUI) ctx.ui.setStatus("cache", undefined);
     },
@@ -762,13 +949,19 @@ async function summarizeWithFlash(
   }
 
   if (!model) {
-    ctx.ui.notify("deepseek-cache: flash model not found, skipping cache-friendly compaction", "warning");
+    ctx.ui.notify(
+      "deepseek-cache: flash model not found, skipping cache-friendly compaction",
+      "warning",
+    );
     return;
   }
 
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
   if (!auth.ok || !auth.apiKey) {
-    ctx.ui.notify("deepseek-cache: flash auth failed, falling back to default compaction", "warning");
+    ctx.ui.notify(
+      "deepseek-cache: flash auth failed, falling back to default compaction",
+      "warning",
+    );
     return;
   }
 
@@ -776,21 +969,31 @@ async function summarizeWithFlash(
     const response = await complete(
       model,
       {
-        messages: [{
-          role: "user" as const,
-          content: [{
-            type: "text" as const,
-            text:
-              "Summarize this conversation history into structured markdown. " +
-              "Cover: ① goal ② key decisions & rationale ③ code/file changes " +
-              "④ current progress ⑤ blockers & open questions ⑥ next steps. " +
-              "Be thorough — this summary replaces the original history.\n\n" + text,
-          }],
-          timestamp: Date.now(),
-        }],
+        messages: [
+          {
+            role: "user" as const,
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  "Summarize this conversation history into structured markdown. " +
+                  "Cover: ① goal ② key decisions & rationale ③ code/file changes " +
+                  "④ current progress ⑤ blockers & open questions ⑥ next steps. " +
+                  "Be thorough — this summary replaces the original history.\n\n" +
+                  text,
+              },
+            ],
+            timestamp: Date.now(),
+          },
+        ],
         temperature: 0,
       },
-      { apiKey: auth.apiKey, headers: auth.headers, maxTokens: SUMMARY_MAX_TOKENS, signal },
+      {
+        apiKey: auth.apiKey,
+        headers: auth.headers,
+        maxTokens: SUMMARY_MAX_TOKENS,
+        signal,
+      },
     );
 
     const summary = response.content
@@ -801,7 +1004,10 @@ async function summarizeWithFlash(
     return summary.trim() || undefined;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    ctx.ui.notify(`deepseek-cache: flash summarization failed (${msg}), falling back to default compaction`, "error");
+    ctx.ui.notify(
+      `deepseek-cache: flash summarization failed (${msg}), falling back to default compaction`,
+      "error",
+    );
     return;
   }
 }
