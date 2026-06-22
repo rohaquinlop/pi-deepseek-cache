@@ -4,6 +4,7 @@ import {
   todayISO,
   calcHitRate,
   estimateSavings,
+  getPricingTier,
 } from "../lib/helpers.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -137,27 +138,71 @@ describe("calcHitRate", () => {
 // estimateSavings
 // ═══════════════════════════════════════════════════════════════════════════
 
+describe("getPricingTier", () => {
+  it("returns flash pricing for deepseek-v4-flash", () => {
+    const tier = getPricingTier("deepseek-v4-flash");
+    expect(tier.cacheHitPerM).toBe(0.0028);
+    expect(tier.cacheMissPerM).toBe(0.14);
+    expect(tier.outputPerM).toBe(0.28);
+  });
+
+  it("returns pro pricing for deepseek-v4-pro", () => {
+    const tier = getPricingTier("deepseek-v4-pro");
+    expect(tier.cacheHitPerM).toBe(0.003625);
+    expect(tier.cacheMissPerM).toBe(0.435);
+    expect(tier.outputPerM).toBe(0.87);
+  });
+
+  it("returns flash fallback for undefined", () => {
+    const tier = getPricingTier(undefined);
+    expect(tier.cacheHitPerM).toBe(0.0028);
+  });
+
+  it("returns flash fallback for unknown model", () => {
+    const tier = getPricingTier("unknown-model");
+    expect(tier.cacheHitPerM).toBe(0.0028);
+  });
+
+  it("falls back to flash for unknown variants (startsWith matching)", () => {
+    // "deepseek-v4-flash-lite" starts with "deepseek-v4-flash" → flash tier
+    const tier = getPricingTier("deepseek-v4-flash-lite");
+    expect(tier.cacheHitPerM).toBe(0.0028);
+  });
+});
+
 describe("estimateSavings", () => {
-  it("returns 0 for no cache reads", () => {
-    expect(estimateSavings(0)).toBe(0);
+  it("returns zero savings for no cache reads and no input", () => {
+    const result = estimateSavings(0, 0);
+    expect(result.saved).toBe(0);
   });
 
-  it("calculates savings for known values", () => {
-    // 1M cache read tokens: 1M * (0.27 - 0.027) / 1M = 0.243
-    expect(estimateSavings(1_000_000)).toBeCloseTo(0.243, 3);
+  it("calculates savings for v4-flash with known values", () => {
+    // 1M cache read tokens at v4-flash: cacheHitCost = 1M * 0.0028 / 1M = $0.0028
+    // Without cache: 1M * 0.14 / 1M = $0.14
+    // Saved = $0.14 - $0.0028 = $0.1372
+    const result = estimateSavings(1_000_000, 0, 0, "deepseek-v4-flash");
+    expect(result.saved).toBeCloseTo(0.1372, 4);
   });
 
-  it("scales linearly", () => {
-    const perToken = 0.27 - 0.027;
-    expect(estimateSavings(100_000)).toBeCloseTo(0.1 * perToken, 4);
-    expect(estimateSavings(10_000_000)).toBeCloseTo(10 * perToken, 4);
+  it("calculates savings for v4-pro with known values", () => {
+    // 1M cache read tokens at v4-pro: cacheHitCost = 1M * 0.003625 / 1M = $0.003625
+    // Without cache: 1M * 0.435 / 1M = $0.435
+    // Saved = $0.435 - $0.003625 = $0.431375
+    const result = estimateSavings(1_000_000, 0, 0, "deepseek-v4-pro");
+    expect(result.saved).toBeCloseTo(0.431375, 4);
   });
 
-  it("matches the cost constants in the extension", () => {
-    // Cross-check: 1M tokens at hit price = $0.027, at miss price = $0.27
-    // So 1M cache read tokens saved = $0.243
-    const savings = estimateSavings(1_000_000);
-    expect(savings).toBeGreaterThan(0.24);
-    expect(savings).toBeLessThan(0.25);
+  it("v4-pro estimates differ from v4-flash for same token counts", () => {
+    const flash = estimateSavings(500_000, 200_000, 0, "deepseek-v4-flash");
+    const pro = estimateSavings(500_000, 200_000, 0, "deepseek-v4-pro");
+    expect(pro.saved).toBeGreaterThan(flash.saved);
+  });
+
+  it("includes output token costs in effectiveCost", () => {
+    const noOutput = estimateSavings(100_000, 50_000, 0, "deepseek-v4-flash");
+    const withOutput = estimateSavings(100_000, 50_000, 100_000, "deepseek-v4-flash");
+    expect(withOutput.effectiveCost).toBeGreaterThan(noOutput.effectiveCost);
+    // saved should be the same (output cost doesn\'t change with caching)
+    expect(withOutput.saved).toBeCloseTo(noOutput.saved, 6);
   });
 });

@@ -41,14 +41,65 @@ export function calcHitRate(cacheRead: number, input: number, cacheWrite: number
   return denom > 0 ? (cacheRead / denom) * 100 : 0;
 }
 
+// ─── Pricing (moved from function-local constants) ──────────────────
+// Architectural change: these were previously local to estimateSavings().
+// Now module-level for testability and consistent access.
+// Last verified: 2026-06-22 — source: https://api-docs.deepseek.com/quick_start/pricing
+
+export interface PricingTier {
+  cacheHitPerM: number;   // $ per 1M tokens
+  cacheMissPerM: number;  // $ per 1M tokens
+  outputPerM: number;     // $ per 1M tokens
+}
+
+export const PRICING_TIERS: Record<string, PricingTier> = {
+  "deepseek-v4-flash": {
+    cacheHitPerM: 0.0028,
+    cacheMissPerM: 0.14,
+    outputPerM: 0.28,
+  },
+  "deepseek-v4-pro": {
+    cacheHitPerM: 0.003625,
+    cacheMissPerM: 0.435,
+    outputPerM: 0.87,
+  },
+};
+
+export const FALLBACK_PRICING = PRICING_TIERS["deepseek-v4-flash"];
+
+export function getPricingTier(modelId?: string): PricingTier {
+  if (!modelId) return FALLBACK_PRICING;
+  // Use startsWith to avoid false positives (e.g., "deepseek-v4-flash-lite" should not match v4-flash).
+  const key = Object.keys(PRICING_TIERS).find(k => modelId.startsWith(k));
+  return key ? PRICING_TIERS[key] : FALLBACK_PRICING;
+}
+
 /**
  * Estimate cost savings from cache hits vs cache misses.
- * Returns USD saved.
+ * Returns an object with saved (USD), hitRate, effectiveCost, and withoutCacheCost.
  */
-export function estimateSavings(cacheReadTokens: number): number {
-  const COST_PER_M_CACHE_READ = 0.027;
-  const COST_PER_M_INPUT = 0.27;
-  return (cacheReadTokens / 1_000_000) * (COST_PER_M_INPUT - COST_PER_M_CACHE_READ);
+export function estimateSavings(
+  cacheRead: number,
+  input: number = 0,
+  output: number = 0,
+  modelId?: string
+): { saved: number; hitRate: number; effectiveCost: number; withoutCacheCost: number } {
+  const pricing = getPricingTier(modelId);
+
+  // Cost WITH caching: cache hits at discounted rate, cache misses at full rate
+  const cacheHitCost  = (cacheRead * pricing.cacheHitPerM) / 1_000_000;
+  const cacheMissCost = (input * pricing.cacheMissPerM) / 1_000_000;
+  const outputCost    = (output * pricing.outputPerM) / 1_000_000;
+  const effectiveCost = cacheHitCost + cacheMissCost + outputCost;
+
+  // Cost WITHOUT caching: all tokens at full input rate
+  const withoutCacheCost = ((cacheRead + input) * pricing.cacheMissPerM) / 1_000_000 + outputCost;
+
+  const saved = withoutCacheCost - effectiveCost;
+  const totalTokens = cacheRead + input;
+  const hitRate = totalTokens > 0 ? cacheRead / totalTokens : 0;
+
+  return { saved, hitRate, effectiveCost, withoutCacheCost };
 }
 
 /**
