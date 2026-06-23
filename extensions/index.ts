@@ -802,7 +802,9 @@ export default function (pi: ExtensionAPI) {
     // Only intercept if we're on a DeepSeek model
     if (!isDeepSeekModel(ctx.model)) return;
 
-    const { messagesToSummarize, previousSummary, firstKeptEntryId, tokensBefore, signal } = event;
+    const { preparation, signal } = event;
+    if (!preparation) return; // fall back to default compaction
+    const { messagesToSummarize, previousSummary, firstKeptEntryId, tokensBefore } = preparation;
 
     flushPendingWrites(sessionId);
 

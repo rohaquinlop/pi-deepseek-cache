@@ -3,30 +3,33 @@ import { createHash } from "node:crypto";
 
 describe("session_before_compact event shape", () => {
   it("documents the expected destructured fields from the event", () => {
-    // The session_before_compact handler destructures these fields from event:
-    //   messagesToSummarize, previousSummary, firstKeptEntryId, tokensBefore, signal
+    // The session_before_compact handler destructures fields from event.preparation:
+    //   const { preparation, signal } = event;
+    //   const { messagesToSummarize, previousSummary, firstKeptEntryId, tokensBefore } = preparation;
     //
     // This test documents the contract — actual runtime test would need pi harness.
-    // The fields are verified by the Step 1 fix (adding the destructuring).
-    const requiredFields = [
+    const preparationFields = [
       "messagesToSummarize",
       "previousSummary",
       "firstKeptEntryId",
       "tokensBefore",
-      "signal",
     ];
 
-    // Simulate an event object with all required fields
+    // Simulate an event object with the correct nested shape
     const mockEvent = {
-      messagesToSummarize: [],
-      previousSummary: "Previous summary text",
-      firstKeptEntryId: "entry-42",
-      tokensBefore: 5000,
+      preparation: {
+        messagesToSummarize: [],
+        previousSummary: "Previous summary text",
+        firstKeptEntryId: "entry-42",
+        tokensBefore: 5000,
+      },
       signal: new AbortController().signal,
     };
 
-    for (const field of requiredFields) {
-      expect(mockEvent).toHaveProperty(field);
+    expect(mockEvent).toHaveProperty("preparation");
+    expect(mockEvent).toHaveProperty("signal");
+    for (const field of preparationFields) {
+      expect(mockEvent.preparation).toHaveProperty(field);
     }
   });
 
