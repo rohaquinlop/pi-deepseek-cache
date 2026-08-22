@@ -160,3 +160,113 @@ export function applyDateFreeze(prompt: string, date: string): string {
 export function applyCwdFreeze(prompt: string, cwd: string): string {
   return prompt.replace(CWD_LINE_RE, frozenCwd(cwd));
 }
+
+// ─── P5: OpenRouter auto-pin ────────────────────────────────────
+
+/** One entry of OpenRouter's `/api/v1/models/{slug}/endpoints` response. */
+export interface OpenRouterEndpoint {
+  provider_name?: string;
+  tag?: string;
+  status?: number;
+  pricing?: { input_cache_read?: string | null } | null;
+}
+
+export interface ProviderPin {
+  order: string[];
+  allow_fallbacks: false;
+}
+
+/**
+ * Pick the pin target from an endpoints list: the cheapest endpoint whose
+ * pricing declares input_cache_read (i.e. the upstream supports prefix
+ * caching). Ties broken by provider name for determinism.
+ * Returns undefined when no cache-capable endpoint exists.
+ */
+export function pickCacheCapableUpstream(
+  endpoints: OpenRouterEndpoint[],
+): string | undefined {
+  const cacheable = endpoints.filter((e) => {
+    const raw = e.pricing?.input_cache_read;
+    if (raw === null || raw === undefined) return false;
+    return Number.isFinite(Number(raw));
+  });
+  if (cacheable.length === 0) return undefined;
+  const sorted = [...cacheable].sort((a, b) => {
+    const diff =
+      Number(a.pricing?.input_cache_read) - Number(b.pricing?.input_cache_read);
+    if (diff !== 0) return diff;
+    return String(a.tag).localeCompare(String(b.tag));
+  });
+  // Slug = tag without quantization suffix ("deepinfra/fp8" → "deepinfra").
+  return sorted[0].tag!.split("/")[0];
+}
+
+/**
+ * Build the OpenRouter endpoints API URL for a model id.
+ * Accepts both bare ids ("deepseek-v4-flash") and full slugs
+ * ("deepseek/deepseek-v4-flash"); bare ids are assumed to live in the
+ * deepseek vendor namespace on OpenRouter.
+ */
+export function openRouterEndpointsUrl(modelId: string): string {
+  const slug = modelId.includes("/") ? modelId : `deepseek/${modelId}`;
+  return `https://openrouter.ai/api/v1/models/${slug}/endpoints`;
+}
+
+/**
+ * Decide whether to inject a provider pin into a request payload.
+ * Returns undefined — meaning "leave payload alone" — when the payload already
+ * carries user-supplied routing preferences or when no upstream is known yet.
+ */
+export function computeProviderPin(
+  existingProvider: unknown,
+  pinnedUpstream: string | undefined,
+): ProviderPin | undefined {
+  if (existingProvider !== undefined && existingProvider !== null) {
+    return undefined;
+  }
+  if (!pinnedUpstream) return undefined;
+  return { order: [pinnedUpstream], allow_fallbacks: false };
+}
+
+// ─── P5: pin-cache bookkeeping ─────────────────────────────────
+
+/** How long a successfully detected upstream stays trusted. */
+export const PIN_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+/** Re-check interval after a failed lookup (or while keeping a stale pin). */
+export const PIN_RETRY_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+export interface PinCacheEntry {
+  slug: string | undefined;
+  at: number;
+  /** True when the last lookup failed; entry expires sooner. */
+  degraded?: boolean;
+}
+
+/** Is the entry still within its TTL? Degraded entries use the shorter one. */
+export function pinEntryFresh(entry: PinCacheEntry | undefined, now: number): boolean {
+  if (!entry) return false;
+  const ttl = entry.degraded ? PIN_RETRY_TTL_MS : PIN_TTL_MS;
+  return now - entry.at < ttl;
+}
+
+/**
+ * Merge a lookup result into the cache.
+ *
+ * A successful lookup replaces the entry outright. A failed lookup must not
+ * evict a known-good upstream (e.g. transient network blip dropping a working
+ * pin): the previous slug keeps serving, marked degraded so it is re-checked
+ * on the short TTL. A failure with nothing cached also degrades, so retries
+ * happen in minutes instead of locking "no pin" in for the full TTL.
+ */
+export function mergePinLookupResult(
+  prev: PinCacheEntry | undefined,
+  fetchedSlug: string | undefined,
+  now: number,
+): PinCacheEntry {
+  if (!fetchedSlug) {
+    return prev?.slug
+      ? { slug: prev.slug, at: now, degraded: true }
+      : { slug: undefined, at: now, degraded: true };
+  }
+  return { slug: fetchedSlug, at: now, degraded: false };
+}

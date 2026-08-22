@@ -24,6 +24,11 @@
  *   P4 — TUI overlays: /cache-stats and /cache-graph display hit-rate
  *        data, cost estimates, and ASCII trend charts as overlay popups.
  *
+ *   P5 — OpenRouter auto-pin: on OpenRouter, prefix caching only hits when
+ *        every request lands on the same upstream provider. Auto-detects the
+ *        cheapest cache-capable upstream and pins it via the `provider`
+ *        routing object (order + allow_fallbacks:false).
+ *
  * Works with any provider serving DeepSeek models — detected by model ID
  * prefix (deepseek-*) or provider name (deepseek). No provider names are
  * hardcoded. Non-DeepSeek models pass through unchanged.
@@ -67,6 +72,13 @@ import {
   isCwdFrozen,
   applyDateFreeze,
   applyCwdFreeze,
+  pickCacheCapableUpstream,
+  openRouterEndpointsUrl,
+  computeProviderPin,
+  pinEntryFresh,
+  mergePinLookupResult,
+  type OpenRouterEndpoint,
+  type PinCacheEntry,
 } from "../lib/helpers.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -97,6 +109,8 @@ interface PersistedStats {
   input: number;
   cacheWrite: number;
   turns: number;
+  /** P5: set once auto-pin injection has occurred this session. */
+  openrouterPinned?: boolean;
 }
 
 interface HistoryPoint {
@@ -109,6 +123,63 @@ interface CachedMessage {
   role: string;
   content?: string;
   customType?: string;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P5: OpenRouter upstream detection (module-level, shared across sessions)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const PIN_LOOKUP_TIMEOUT_MS = 10_000;
+
+const pinCache = new Map<string, PinCacheEntry>();
+const inflightLookups = new Map<string, Promise<void>>();
+
+async function fetchPinnedUpstream(
+  modelId: string,
+): Promise<string | undefined> {
+  try {
+    const res = await fetch(openRouterEndpointsUrl(modelId), {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(PIN_LOOKUP_TIMEOUT_MS),
+    });
+    if (!res.ok) return undefined;
+    const json = (await res.json()) as {
+      data?: { endpoints?: OpenRouterEndpoint[] };
+    };
+    return pickCacheCapableUpstream(json.data?.endpoints ?? []);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Return the detected pin target for an OpenRouter model, kicking off a
+ * background endpoints-API lookup when none is cached (or the cache expired).
+ * Synchronous by design — requests go out unpinned until a lookup resolves;
+ * expired entries keep serving until the refresh lands.
+ */
+/**
+ * Return the detected pin target for an OpenRouter model, kicking off a
+ * background endpoints-API lookup when none is cached (or the cache expired).
+ * Synchronous by design — requests go out unpinned until a lookup resolves;
+ * expired entries keep serving until the refresh lands. A failed refresh
+ * keeps any previously detected upstream but degrades to the short retry TTL.
+ */
+function ensurePinnedUpstream(modelId: string): string | undefined {
+  const entry = pinCache.get(modelId);
+  if (pinEntryFresh(entry, Date.now())) return entry!.slug;
+
+  if (!inflightLookups.has(modelId)) {
+    const lookup = fetchPinnedUpstream(modelId)
+      .then((slug) => {
+        pinCache.set(modelId, mergePinLookupResult(entry, slug, Date.now()));
+      })
+      .finally(() => {
+        inflightLookups.delete(modelId);
+      });
+    inflightLookups.set(modelId, lookup);
+  }
+  return entry?.slug; // stale value while refreshing, undefined on first call
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -383,6 +454,7 @@ class CacheStatsOverlay implements Focusable {
   private theme: any;
   private done: () => void;
   private modelId?: string;
+  private pin?: { upstream?: string; userOverride: boolean };
 
   constructor(
     theme: any,
@@ -391,6 +463,7 @@ class CacheStatsOverlay implements Focusable {
     aggregate?: PersistedStats & { sessionCount: number },
     prefixBreaks?: number,
     modelId?: string,
+    pin?: { upstream?: string; userOverride: boolean },
   ) {
     this.theme = theme;
     this.stats = stats;
@@ -398,6 +471,7 @@ class CacheStatsOverlay implements Focusable {
     this.aggregate = aggregate;
     if (prefixBreaks !== undefined) this.prefixBreaks = prefixBreaks;
     if (modelId !== undefined) this.modelId = modelId;
+    if (pin !== undefined) this.pin = pin;
   }
 
   handleInput(data: string): void {
@@ -481,6 +555,18 @@ class CacheStatsOverlay implements Focusable {
     }
 
     lines.push(row(""));
+    if (this.pin) {
+      const value = this.pin.userOverride
+        ? "user-managed"
+        : this.pin.upstream
+          ? this.pin.upstream
+          : "detecting…";
+      lines.push(
+        row(
+          `  ${th.fg("dim", "OpenRouter pin".padEnd(18))}${th.fg("accent", value)}`,
+        ),
+      );
+    }
     if (this.prefixBreaks > 0) {
       lines.push(
         row(
@@ -630,6 +716,10 @@ export default function (pi: ExtensionAPI) {
   let warnedThisTurn = false;
   let prefixBreaks = 0;
 
+  // ────── P5: OpenRouter auto-pin state ──────
+  let openrouterPinnedThisSession = false;
+  let openrouterUserOverride = false;
+
   // ────── P3: Summary cache ──────
   const summaryCache = loadSummaryCache();
 
@@ -662,6 +752,8 @@ export default function (pi: ExtensionAPI) {
     lastPrefixHash = undefined;
     warnedThisTurn = false;
     prefixBreaks = 0;
+    openrouterPinnedThisSession = false;
+    openrouterUserOverride = false;
 
     // Cleanup old session files
     maybeCleanupOldSessions();
@@ -715,6 +807,7 @@ export default function (pi: ExtensionAPI) {
     turns += 1;
 
     const stats: PersistedStats = { cacheRead, input, cacheWrite, turns };
+    if (openrouterPinnedThisSession) stats.openrouterPinned = true;
     scheduleSaveStats(stats, sessionId);
 
     // Use total prompt tokens as denominator for accurate hit rate.
@@ -762,9 +855,28 @@ export default function (pi: ExtensionAPI) {
     setCtx(ctx);
     if (!isDeepSeekModel(ctx.model)) return;
 
-    const payload = event.payload as { messages?: CachedMessage[] };
+    const payload = event.payload as {
+      messages?: CachedMessage[];
+      provider?: unknown;
+    };
     const msgs = payload.messages ?? [];
     if (msgs.length === 0) return;
+
+    // P5: OpenRouter auto-pin — prefix caching only hits when every request
+    // lands on the same upstream. Pin the detected cache-capable upstream via
+    // the `provider` routing object unless the user set their own preferences.
+    if (ctx.model?.provider === "openrouter") {
+      if (payload.provider !== undefined && payload.provider !== null) {
+        openrouterUserOverride = true;
+      } else {
+        const upstream = ensurePinnedUpstream(ctx.model.id);
+        const pin = computeProviderPin(payload.provider, upstream);
+        if (pin) {
+          payload.provider = pin;
+          openrouterPinnedThisSession = true;
+        }
+      }
+    }
 
     // P2: Prefix guard — detect cache-breaking mutations
     // DeepSeek's prefix cache matches from byte position 0 in the prompt.
@@ -852,6 +964,12 @@ export default function (pi: ExtensionAPI) {
             agg,
             prefixBreaks,
             ctx.model?.id,
+            ctx.model?.provider === "openrouter"
+              ? {
+                  upstream: ensurePinnedUpstream(ctx.model.id),
+                  userOverride: openrouterUserOverride,
+                }
+              : undefined,
           ),
         { overlay: true },
       );
@@ -884,6 +1002,8 @@ export default function (pi: ExtensionAPI) {
       lastPrefixHash = undefined;
       warnedThisTurn = false;
       prefixBreaks = 0;
+      openrouterPinnedThisSession = false;
+      openrouterUserOverride = false;
       summaryCache.clear();
 
       // Clear pending writes without flushing to disk (files get deleted below)
