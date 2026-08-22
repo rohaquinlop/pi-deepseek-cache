@@ -93,4 +93,4 @@ Clears all cached statistics, history, and summary cache — deletes all per-ses
 
 ## License
 
-MIT
+[MIT](LICENSE) © Robin Quintero
