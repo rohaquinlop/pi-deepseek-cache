@@ -87,6 +87,7 @@ import {
   estimateCreditSavings,
   formatCredits,
   isCacheOptimizedModel,
+  pickSummarizerModel,
   resolveCreditTier,
   resolveDisplayUnit,
   resolveOpenRouterVendor,
@@ -1114,28 +1115,17 @@ export default function (pi: ExtensionAPI) {
 
 /**
  * Resolve the summarizer model for the active family. Preference order:
- * each candidate on the active provider, each candidate on any provider,
- * then the active model itself.
+ * each candidate on the active provider, each candidate on any provider with
+ * configured auth, then the active model itself.
  */
 function resolveSummarizerModel(ctx: ExtensionContext) {
-  const candidates = resolveSummarizerCandidates(ctx.model);
-  const activeProvider = ctx.model?.provider;
-
-  if (activeProvider) {
-    for (const candidate of candidates) {
-      const found = ctx.modelRegistry.find(activeProvider, candidate);
-      if (found) return found;
-    }
-  }
-
-  for (const candidate of candidates) {
-    for (const provider of ctx.modelRegistry.listProviders()) {
-      const found = ctx.modelRegistry.find(provider, candidate);
-      if (found) return found;
-    }
-  }
-
-  return ctx.model;
+  return (
+    pickSummarizerModel(
+      resolveSummarizerCandidates(ctx.model),
+      ctx.model?.provider,
+      ctx.modelRegistry,
+    ) ?? ctx.model
+  );
 }
 
 async function summarizeWithModel(

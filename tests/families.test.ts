@@ -7,6 +7,7 @@ import {
   formatCredits,
   isCacheOptimizedModel,
   longestPrefixMatch,
+  pickSummarizerModel,
   resolveCreditTier,
   resolveDisplayUnit,
   resolveOpenRouterVendor,
@@ -243,6 +244,52 @@ describe("resolveSummarizerCandidates", () => {
   it("returns an empty list for unknown models", () => {
     expect(resolveSummarizerCandidates({ id: "gpt-4o", provider: "openai" })).toEqual([]);
     expect(resolveSummarizerCandidates(undefined)).toEqual([]);
+  });
+});
+
+describe("pickSummarizerModel", () => {
+  const model = (id: string, provider: string) => ({ id, provider });
+
+  it("prefers a candidate on the active provider", () => {
+    const picked = pickSummarizerModel(["deepseek-v4-flash"], "deepseek", {
+      find: (provider, id) =>
+        provider === "deepseek" && id === "deepseek-v4-flash"
+          ? model(id, provider)
+          : undefined,
+      getAvailable: () => [model("deepseek-v4-flash", "opencode")],
+    });
+
+    expect(picked).toEqual(model("deepseek-v4-flash", "deepseek"));
+  });
+
+  it("falls back to a candidate on another provider with configured auth", () => {
+    const picked = pickSummarizerModel(["deepseek-v4-flash"], "deepseek", {
+      find: () => undefined,
+      getAvailable: () => [model("deepseek-v4-flash", "openrouter")],
+    });
+
+    expect(picked).toEqual(model("deepseek-v4-flash", "openrouter"));
+  });
+
+  it("ignores providers without configured auth instead of throwing", () => {
+    // Regression: the old implementation iterated modelRegistry.listProviders(),
+    // which pi's ModelRegistry facade has never exposed, so this path threw a
+    // TypeError inside session_before_compact instead of returning undefined.
+    const picked = pickSummarizerModel(["deepseek-v4-flash"], "deepseek", {
+      find: () => undefined,
+      getAvailable: () => [],
+    });
+
+    expect(picked).toBeUndefined();
+  });
+
+  it("returns undefined when the family has no candidates", () => {
+    const picked = pickSummarizerModel([], "deepseek", {
+      find: () => model("deepseek-flash", "deepseek"),
+      getAvailable: () => [model("deepseek-flash", "deepseek")],
+    });
+
+    expect(picked).toBeUndefined();
   });
 });
 
