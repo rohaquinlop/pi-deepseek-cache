@@ -271,6 +271,51 @@ export function resolveSummarizerCandidates(
   return findFamily(model)?.summarizerModels ?? [];
 }
 
+/** Minimal model shape needed to resolve a summarizer. */
+export interface SummarizerModelRef {
+  id: string;
+  provider: string;
+}
+
+/** Registry surface used to resolve a summarizer (a subset of pi's ModelRegistry). */
+export interface SummarizerRegistry<T extends SummarizerModelRef> {
+  find(provider: string, modelId: string): T | undefined;
+  /** Models with configured auth — pi's ModelRegistry.getAvailable(). */
+  getAvailable(): T[];
+}
+
+/**
+ * Pick the summarizer for the active model's family.
+ *
+ * Preference order: each candidate on the active provider, then each candidate
+ * on any provider with configured auth. Returns undefined when nothing matches,
+ * so the caller can fall back to the active model.
+ *
+ * pi's extension-facing ModelRegistry has never exposed `listProviders()`;
+ * scanning `getAvailable()` avoids that crash and skips providers the user has
+ * no credentials for (for example a shared model id served by another gateway).
+ */
+export function pickSummarizerModel<T extends SummarizerModelRef>(
+  candidates: string[],
+  activeProvider: string | undefined,
+  registry: SummarizerRegistry<T>,
+): T | undefined {
+  if (activeProvider) {
+    for (const candidate of candidates) {
+      const found = registry.find(activeProvider, candidate);
+      if (found) return found;
+    }
+  }
+
+  const available = registry.getAvailable();
+  for (const candidate of candidates) {
+    const found = available.find((model) => model.id === candidate);
+    if (found) return found;
+  }
+
+  return undefined;
+}
+
 /** OpenRouter vendor namespace for the active model's family. */
 export function resolveOpenRouterVendor(
   model: { id: string; provider: string } | undefined,
